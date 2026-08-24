@@ -1,0 +1,29 @@
+services:
+  api:
+    build: .
+    env_file: .env
+    ports:
+      - "8091:8091"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: barmej
+      POSTGRES_PASSWORD: barmej
+      POSTGRES_DB: barmej
+    ports:
+      - "5432:5432"
+    volumes:
+      - barmej_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U barmej -d barmej"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  barmej_postgres:

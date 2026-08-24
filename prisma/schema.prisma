@@ -1,0 +1,138 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum ReservationStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+}
+
+model User {
+  id            Int            @id @default(autoincrement()) @map("id_user")
+  email         String         @unique @map("email")
+  passwordHash  String?        @map("password_hash")
+  firstName     String         @map("first_name")
+  lastName      String         @default("") @map("last_name")
+  mobile        String?        @map("mobile")
+  gender        String?        @map("gender")
+  photo         String?        @map("photo")
+  birthDate     DateTime?      @map("birth_date") @db.Date
+  role          UserRole       @default(USER)
+  externalId    String?        @unique @map("external_id")
+  latitude      Float?
+  longitude     Float?
+  deviceToken   String?        @map("device_token")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+  favorites     Favorite[]
+  reservations  Reservation[]
+  reports       Report[]
+  notifications Notification[]
+
+  @@map("users")
+}
+
+model Category {
+  id        Int      @id @default(autoincrement()) @map("id_category")
+  name      String
+  image     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  places    Place[]
+
+  @@map("categories")
+}
+
+model Place {
+  id            Int           @id @default(autoincrement()) @map("id_place")
+  categoryId    Int           @map("category_id")
+  name          String
+  subtitle      String?
+  image         String?
+  latitude      Float
+  longitude     Float
+  phone         String?
+  address       String?
+  email         String?
+  description   String?
+  outfit        String?
+  musicStyle    String?       @map("music_style")
+  happyHour     String?       @map("happy_hour")
+  schedule      String?
+  favorableDay  String?       @map("favorable_day")
+  favorableHour String?       @map("favorable_hour")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  updatedAt     DateTime      @updatedAt @map("updated_at")
+  category      Category      @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  favorites     Favorite[]
+  reservations  Reservation[]
+  reports       Report[]
+
+  @@index([categoryId])
+  @@map("places")
+}
+
+model Favorite {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  placeId   Int      @map("place_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  place     Place    @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, placeId])
+  @@map("favorites")
+}
+
+model Reservation {
+  id              Int               @id @default(autoincrement()) @map("id_reservation")
+  userId          Int               @map("user_id")
+  placeId         Int               @map("place_id")
+  reservationDate DateTime          @map("reservation_date") @db.Date
+  reservationTime String            @map("reservation_time")
+  numberOfPersons Int               @map("number_of_persons")
+  message         String?
+  status          ReservationStatus @default(PENDING)
+  createdAt       DateTime          @default(now()) @map("created_at")
+  updatedAt       DateTime          @updatedAt @map("updated_at")
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  place           Place             @relation(fields: [placeId], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+  @@map("reservations")
+}
+
+model Report {
+  id          Int      @id @default(autoincrement())
+  userId      Int      @map("user_id")
+  placeId     Int      @map("place_id")
+  description String
+  createdAt   DateTime @default(now()) @map("created_at")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  place       Place    @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@map("reports")
+}
+
+model Notification {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  title     String
+  message   String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read])
+  @@map("notifications")
+}
