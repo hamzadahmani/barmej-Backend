@@ -54,7 +54,7 @@ async function main() {
   const savedPlaces = [];
   for (const place of places) {
     const existing = await prisma.place.findFirst({where: {name: place.name}});
-    const data = {...place, phone: '+216 70 000 000', email: 'contact@barmej.app'};
+    const data = {...place, phone: '+216 70 000 000', email: 'contact@barmej.app', averagePrice: place.categoryId === 2 ? 18 : place.categoryId === 1 ? 55 : 40, capacityPerSlot: place.categoryId === 2 ? 16 : 30};
     savedPlaces.push(existing ? await prisma.place.update({where: {id: existing.id}, data}) : await prisma.place.create({data}));
   }
 
@@ -63,6 +63,7 @@ async function main() {
   }
 
   const reservations = [
+    {place: savedPlaces[2]!, date: '2026-08-20', time: '19:30', persons: 2, status: ReservationStatus.COMPLETED},
     {place: savedPlaces[0]!, date: '2026-08-28', time: '20:00', persons: 2, status: ReservationStatus.CONFIRMED},
     {place: savedPlaces[5]!, date: '2026-08-30', time: '10:30', persons: 3, status: ReservationStatus.PENDING},
     {place: savedPlaces[10]!, date: '2026-09-05', time: '21:30', persons: 4, status: ReservationStatus.PENDING},

@@ -16,6 +16,23 @@ enum ReservationStatus {
   PENDING
   CONFIRMED
   CANCELLED
+  DECLINED
+  COMPLETED
+  NO_SHOW
+}
+
+enum WaitlistStatus {
+  WAITING
+  OFFERED
+  CONFIRMED
+  EXPIRED
+  CANCELLED
+}
+
+enum GroupPlanStatus {
+  VOTING
+  FINALIZED
+  CANCELLED
 }
 
 model User {
@@ -39,6 +56,10 @@ model User {
   reservations  Reservation[]
   reports       Report[]
   notifications Notification[]
+  reviews       Review[]
+  waitlistEntries WaitlistEntry[]
+  organizedPlans GroupPlan[] @relation("GroupPlanOrganizer")
+  groupVotes GroupVote[]
 
   @@map("users")
 }
@@ -71,12 +92,17 @@ model Place {
   schedule      String?
   favorableDay  String?       @map("favorable_day")
   favorableHour String?       @map("favorable_hour")
+  averagePrice  Int?          @map("average_price")
+  capacityPerSlot Int         @default(20) @map("capacity_per_slot")
   createdAt     DateTime      @default(now()) @map("created_at")
   updatedAt     DateTime      @updatedAt @map("updated_at")
   category      Category      @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   favorites     Favorite[]
   reservations  Reservation[]
   reports       Report[]
+  reviews       Review[]
+  waitlistEntries WaitlistEntry[]
+  groupOptions  GroupOption[]
 
   @@index([categoryId])
   @@map("places")
@@ -107,6 +133,7 @@ model Reservation {
   updatedAt       DateTime          @updatedAt @map("updated_at")
   user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   place           Place             @relation(fields: [placeId], references: [id], onDelete: Restrict)
+  review          Review?
 
   @@index([userId])
   @@map("reservations")
@@ -135,4 +162,89 @@ model Notification {
 
   @@index([userId, read])
   @@map("notifications")
+}
+
+model Review {
+  id              Int      @id @default(autoincrement())
+  reservationId   Int      @unique @map("reservation_id")
+  userId          Int      @map("user_id")
+  placeId         Int      @map("place_id")
+  cuisineRating   Int      @map("cuisine_rating")
+  serviceRating   Int      @map("service_rating")
+  ambianceRating  Int      @map("ambiance_rating")
+  priceRating     Int      @map("price_rating")
+  comment         String?
+  photos          String[] @default([])
+  establishmentResponse String? @map("establishment_response")
+  respondedAt     DateTime? @map("responded_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  reservation     Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  user            User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  place           Place @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@index([placeId, createdAt])
+  @@map("reviews")
+}
+
+model WaitlistEntry {
+  id              Int      @id @default(autoincrement())
+  userId          Int      @map("user_id")
+  placeId         Int      @map("place_id")
+  reservationDate DateTime @map("reservation_date") @db.Date
+  reservationTime String   @map("reservation_time")
+  numberOfPersons Int      @map("number_of_persons")
+  status          WaitlistStatus @default(WAITING)
+  offerExpiresAt  DateTime? @map("offer_expires_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  user            User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  place           Place @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, placeId, reservationDate, reservationTime])
+  @@index([placeId, reservationDate, reservationTime, status])
+  @@map("waitlist_entries")
+}
+
+model GroupPlan {
+  id          Int      @id @default(autoincrement())
+  organizerId Int      @map("organizer_id")
+  title       String
+  inviteEmails String[] @default([]) @map("invite_emails")
+  status      GroupPlanStatus @default(VOTING)
+  votingEndsAt DateTime? @map("voting_ends_at")
+  selectedOptionId Int? @map("selected_option_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  organizer   User @relation("GroupPlanOrganizer", fields: [organizerId], references: [id], onDelete: Cascade)
+  options     GroupOption[]
+
+  @@index([organizerId, createdAt])
+  @@map("group_plans")
+}
+
+model GroupOption {
+  id              Int      @id @default(autoincrement())
+  planId          Int      @map("plan_id")
+  placeId         Int      @map("place_id")
+  reservationDate DateTime @map("reservation_date") @db.Date
+  reservationTime String   @map("reservation_time")
+  plan            GroupPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  place           Place @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  votes           GroupVote[]
+
+  @@unique([planId, placeId, reservationDate, reservationTime])
+  @@map("group_options")
+}
+
+model GroupVote {
+  id        Int @id @default(autoincrement())
+  optionId  Int @map("option_id")
+  userId    Int @map("user_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  option    GroupOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([optionId, userId])
+  @@map("group_votes")
 }
