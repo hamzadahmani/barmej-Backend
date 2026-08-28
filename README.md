@@ -10,6 +10,13 @@ API séparée Node.js + TypeScript + Express + PostgreSQL, compatible avec les e
 - catégories, lieux, recherche et proximité géographique ;
 - favoris ;
 - réservations ;
+- calendrier quotidien et hebdomadaire Barmej Pro ;
+- indicateur de risque d’absence basé sur l’historique réel du client ;
+- statistiques de fréquentation, récurrence, créneaux et jours forts ;
+- journal d’audit des actions réalisées par l’équipe ;
+- programme de fidélité configurable, attribution automatique des points et utilisation sécurisée des récompenses ;
+- score public de complétude sur 100 avec recommandations prioritaires pour le gérant ;
+- disponibilités réelles par établissement (horaires hebdomadaires, jours fermés, capacité et exceptions par créneau) ;
 - signalements ;
 - jetons appareil et notifications ;
 - validation Zod, Helmet, CORS et erreurs structurées ;
@@ -30,6 +37,15 @@ npm run dev
 ```
 
 L'API écoute sur `http://localhost:8090`. Le compte de démonstration est `demo@barmej.app` / `Demo123!`.
+
+### Comptes Barmej Pro de démonstration
+
+- établissement : `pro@barmej.app` / `Pro12345!` ;
+- portier (scanner uniquement) : `scanner.patio@barmej.app` / `Scanner123!` ;
+- clients : `sarra@barmej.app`, `youssef@barmej.app`, `ines@barmej.app`, `malek@barmej.app`, `eya@barmej.app` ;
+- mot de passe commun des clients : `Client123!`.
+
+Le seed crée pour **Le Patio** des réservations dans tous les statuts, une proposition d’horaire, une fermeture exceptionnelle, des capacités personnalisées, un créneau fermé, une liste d’attente, un avis vérifié avec réponse et des notifications.
 
 ## Câblage avec Barmej
 
@@ -66,6 +82,10 @@ npm run build
 | POST | `/setToken`, `/deleteUser` | JWT |
 | GET/POST/DELETE | favoris | JWT |
 | GET/POST/PUT | réservations | JWT |
+| GET | `/places/:placeId/availability?date=YYYY-MM-DD&guests=2` | JWT |
+| GET/PUT | `/admin/places/:placeId/availability-settings`, `/admin/places/:placeId/opening-hours` | Admin |
+| POST/DELETE | `/admin/places/:placeId/closures` | Admin |
+| PUT | `/admin/places/:placeId/slot-overrides` | Admin |
 | POST | `/addReport` | JWT |
 | GET/PATCH | `/notifications` | JWT |
 
@@ -79,3 +99,25 @@ Les routes protégées attendent `Authorization: Bearer <token>`.
 - définir précisément `CORS_ORIGIN` ;
 - exécuter `npm run db:deploy` au déploiement ;
 - ne jamais committer `.env`.
+
+## Photos des établissements avec Cloudinary
+
+Les photos sont envoyées directement depuis Barmej Pro vers Cloudinary avec une signature temporaire créée par le backend. La clé secrète Cloudinary reste exclusivement côté serveur. PostgreSQL conserve seulement les métadonnées (`publicId`, URL sécurisée, dimensions et ordre), jamais le fichier image.
+
+1. Dans le tableau de bord Cloudinary, ouvrir **API Keys**.
+2. Ajouter ces variables dans `.env` pour le développement local :
+
+```env
+CLOUDINARY_CLOUD_NAME=nom_du_cloud
+CLOUDINARY_API_KEY=cle_api
+CLOUDINARY_API_SECRET=secret_api
+```
+
+3. Ajouter les mêmes variables secrètes dans **Render > Environment** puis redéployer le backend.
+4. Appliquer la migration qui crée la galerie :
+
+```bash
+npm run db:deploy
+```
+
+Barmej Pro accepte jusqu’à 5 images par établissement, couverture comprise (JPG, PNG, WebP ou HEIC, 8 Mo maximum), ainsi qu’une vidéo de présentation MP4 ou MOV de 60 secondes et 50 Mo maximum. Définir une photo comme couverture met également à jour l'image principale visible dans Barmej.

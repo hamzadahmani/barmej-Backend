@@ -1,9 +1,15 @@
-import {PrismaClient, ReservationStatus} from '@prisma/client';
+import {PrismaClient, ReservationStatus, UserRole, WaitlistStatus} from '@prisma/client';
 import bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
 const image = (id: string) =>
   `https://images.unsplash.com/${id}?auto=format&fit=crop&w=1200&q=80`;
+const dateAt = (daysFromToday: number) => {
+  const value = new Date();
+  value.setUTCHours(0, 0, 0, 0);
+  value.setUTCDate(value.getUTCDate() + daysFromToday);
+  return value;
+};
 
 async function main() {
   const categoryData = [
@@ -54,9 +60,102 @@ async function main() {
   const savedPlaces = [];
   for (const place of places) {
     const existing = await prisma.place.findFirst({where: {name: place.name}});
-    const data = {...place, phone: '+216 70 000 000', email: 'contact@barmej.app', averagePrice: place.categoryId === 2 ? 18 : place.categoryId === 1 ? 55 : 40, capacityPerSlot: place.categoryId === 2 ? 16 : 30};
+    const data = {...place, phone: '+216 70 000 000', email: 'contact@barmej.app', averagePrice: place.categoryId === 2 ? 18 : place.categoryId === 1 ? 55 : 40, capacityPerSlot: place.categoryId === 2 ? 16 : 30, verified: true, cuisineType: place.categoryId === 1 ? 'Méditerranéenne' : place.categoryId === 2 ? 'Café et brunch' : 'Sorties', ambienceTags: place.categoryId === 1 ? ['Romantique', 'Familial'] : place.categoryId === 2 ? ['Calme', 'Brunch'] : ['Musique', 'Festif']};
     savedPlaces.push(existing ? await prisma.place.update({where: {id: existing.id}, data}) : await prisma.place.create({data}));
   }
+  await prisma.placeCategory.createMany({
+    data: savedPlaces.flatMap((place, index) => [
+      {placeId: place.id, categoryId: place.categoryId},
+      ...(index === 0 ? [{placeId: place.id, categoryId: 3}] : []),
+    ]),
+    skipDuplicates: true,
+  });
+
+  const proUser = await prisma.user.upsert({
+    where: {email: 'pro@barmej.app'},
+    update: {role: UserRole.ESTABLISHMENT, firstName: 'Gérant', lastName: 'Le Patio'},
+    create: {email: 'pro@barmej.app', passwordHash: await bcrypt.hash('Pro12345!', 12), firstName: 'Gérant', lastName: 'Le Patio', mobile: '70000000', role: UserRole.ESTABLISHMENT},
+  });
+  await prisma.placeManager.upsert({where: {userId_placeId: {userId: proUser.id, placeId: savedPlaces[0]!.id}}, update: {}, create: {userId: proUser.id, placeId: savedPlaces[0]!.id}});
+  const scannerUser = await prisma.user.upsert({
+    where: {email: 'scanner.patio@barmej.app'},
+    update: {role: UserRole.SCANNER, firstName: 'Portier', lastName: 'Le Patio'},
+    create: {email: 'scanner.patio@barmej.app', passwordHash: await bcrypt.hash('Scanner123!', 12), firstName: 'Portier', lastName: 'Le Patio', mobile: '70000001', role: UserRole.SCANNER},
+  });
+  await prisma.placeManager.upsert({where: {userId_placeId: {userId: scannerUser.id, placeId: savedPlaces[0]!.id}}, update: {}, create: {userId: scannerUser.id, placeId: savedPlaces[0]!.id}});
+
+  const customerSeeds = [
+    {email: 'sarra@barmej.app', firstName: 'Sarra', lastName: 'Ben Ali', mobile: '20111222'},
+    {email: 'youssef@barmej.app', firstName: 'Youssef', lastName: 'Trabelsi', mobile: '22123499'},
+    {email: 'ines@barmej.app', firstName: 'Inès', lastName: 'Gharbi', mobile: '53123456'},
+    {email: 'malek@barmej.app', firstName: 'Malek', lastName: 'Jaziri', mobile: '98111222'},
+    {email: 'eya@barmej.app', firstName: 'Eya', lastName: 'Mansour', mobile: '27123456'},
+  ];
+  const customers = [demoUser];
+  for (const customer of customerSeeds) {
+    customers.push(await prisma.user.upsert({
+      where: {email: customer.email},
+      update: customer,
+      create: {...customer, passwordHash: await bcrypt.hash('Client123!', 12), dietaryPreferences: ['Sans porc'], favoriteAmbiences: ['Calme', 'Romantique'], preferredBudget: 60},
+    }));
+  }
+
+  // Plusieurs paliers fidélité pour tester le catalogue, le solde et les QR de récompense.
+  const loyaltyCatalogs = [
+    {place: savedPlaces[0]!, pointsPerVisit: 25, rewards: [
+      {name: 'Café ou thé offert', description: 'À utiliser après votre repas.', pointsCost: 100},
+      {name: 'Dessert signature offert', description: 'Au choix dans la carte des desserts.', pointsCost: 250},
+      {name: '-20% sur l’addition', description: 'Hors événements spéciaux.', pointsCost: 500},
+      {name: 'Dîner VIP pour deux', description: 'Menu dégustation réservé aux membres.', pointsCost: 1000, stock: 10},
+    ]},
+    {place: savedPlaces[5]!, pointsPerVisit: 15, rewards: [
+      {name: 'Boisson chaude offerte', description: 'Café, thé ou chocolat chaud.', pointsCost: 100},
+      {name: 'Brunch offert', description: 'Formule brunch complète.', pointsCost: 500, stock: 20},
+    ]},
+    {place: savedPlaces[3]!, pointsPerVisit: 30, rewards: [
+      {name: 'Cocktail sans alcool offert', description: 'À savourer face à la mer.', pointsCost: 150},
+      {name: 'Table vue mer prioritaire', description: 'Selon conditions météo.', pointsCost: 700, stock: 8},
+    ]},
+  ];
+  for (const catalog of loyaltyCatalogs) {
+    const program = await prisma.loyaltyProgram.upsert({where: {placeId: catalog.place.id}, update: {enabled: true, pointsPerVisit: catalog.pointsPerVisit}, create: {placeId: catalog.place.id, enabled: true, pointsPerVisit: catalog.pointsPerVisit}});
+    for (const rewardData of catalog.rewards) {
+      const existingReward = await prisma.loyaltyReward.findFirst({where: {programId: program.id, name: rewardData.name}});
+      const data = {...rewardData, programId: program.id, placeId: catalog.place.id, active: true};
+      if (existingReward) await prisma.loyaltyReward.update({where: {id: existingReward.id}, data});
+      else await prisma.loyaltyReward.create({data});
+    }
+    await prisma.loyaltyAccount.upsert({where: {userId_placeId: {userId: demoUser.id, placeId: catalog.place.id}}, update: {balance: catalog.place.id === savedPlaces[0]!.id ? 620 : 180, lifetimePoints: catalog.place.id === savedPlaces[0]!.id ? 1120 : 330}, create: {userId: demoUser.id, placeId: catalog.place.id, balance: catalog.place.id === savedPlaces[0]!.id ? 620 : 180, lifetimePoints: catalog.place.id === savedPlaces[0]!.id ? 1120 : 330}});
+  }
+
+  for (const place of savedPlaces) {
+    const [openTime, closeTime] = (place.schedule ?? '10:00 - 18:00').replace(/\s/g, '').split('-');
+    for (let weekday = 0; weekday <= 6; weekday += 1) {
+      const isClosed = (place.categoryId === 1 && weekday === 1) || (place.categoryId === 3 && weekday === 2);
+      await prisma.placeOpeningHour.upsert({
+        where: {placeId_weekday: {placeId: place.id, weekday}},
+        update: {openTime, closeTime, isClosed},
+        create: {placeId: place.id, weekday, openTime, closeTime, isClosed},
+      });
+    }
+  }
+
+  // Une fermeture exceptionnelle et deux exceptions de créneau pour tester le planning Pro.
+  await prisma.placeClosure.upsert({
+    where: {placeId_date: {placeId: savedPlaces[0]!.id, date: dateAt(6)}},
+    update: {reason: 'Privatisation exceptionnelle'},
+    create: {placeId: savedPlaces[0]!.id, date: dateAt(6), reason: 'Privatisation exceptionnelle'},
+  });
+  await prisma.placeSlotOverride.upsert({
+    where: {placeId_date_time: {placeId: savedPlaces[0]!.id, date: dateAt(2), time: '20:00'}},
+    update: {capacity: 6, isClosed: false},
+    create: {placeId: savedPlaces[0]!.id, date: dateAt(2), time: '20:00', capacity: 6},
+  });
+  await prisma.placeSlotOverride.upsert({
+    where: {placeId_date_time: {placeId: savedPlaces[0]!.id, date: dateAt(3), time: '21:00'}},
+    update: {capacity: 0, isClosed: true},
+    create: {placeId: savedPlaces[0]!.id, date: dateAt(3), time: '21:00', capacity: 0, isClosed: true},
+  });
 
   for (const place of savedPlaces.slice(0, 5)) {
     await prisma.favorite.upsert({where: {userId_placeId: {userId: demoUser.id, placeId: place.id}}, update: {}, create: {userId: demoUser.id, placeId: place.id}});
@@ -74,6 +173,61 @@ async function main() {
     if (!exists) await prisma.reservation.create({data: {userId: demoUser.id, placeId: seed.place.id, reservationDate, reservationTime: seed.time, numberOfPersons: seed.persons, status: seed.status, message: 'Table calme si possible'}});
   }
 
+
+  const proReservationSeeds = [
+    {user: customers[1]!, day: 0, time: '12:30', persons: 2, status: ReservationStatus.CONFIRMED, occasion: 'Déjeuner'},
+    {user: customers[2]!, day: 0, time: '19:00', persons: 4, status: ReservationStatus.PENDING, occasion: 'Anniversaire'},
+    {user: customers[3]!, day: 1, time: '20:00', persons: 2, status: ReservationStatus.PROPOSED, proposedDay: 1, proposedTime: '20:30', occasion: 'Rendez-vous'},
+    {user: customers[4]!, day: 1, time: '21:00', persons: 6, status: ReservationStatus.CONFIRMED, occasion: 'Dîner en famille'},
+    {user: customers[5]!, day: 2, time: '20:00', persons: 6, status: ReservationStatus.CONFIRMED, occasion: 'Entre amis'},
+    {user: customers[1]!, day: 3, time: '18:30', persons: 3, status: ReservationStatus.PENDING, occasion: 'Afterwork'},
+    {user: customers[2]!, day: -2, time: '20:00', persons: 2, status: ReservationStatus.COMPLETED, occasion: 'Dîner'},
+    {user: customers[3]!, day: -3, time: '19:30', persons: 4, status: ReservationStatus.NO_SHOW, occasion: 'Entre amis'},
+    {user: customers[4]!, day: -4, time: '21:00', persons: 2, status: ReservationStatus.DECLINED, occasion: 'Rendez-vous'},
+    {user: customers[5]!, day: -5, time: '20:30', persons: 5, status: ReservationStatus.CANCELLED, occasion: 'Anniversaire'},
+  ];
+  const createdProReservations: any[] = [];
+  for (const seed of proReservationSeeds) {
+    const reservationDate = dateAt(seed.day);
+    const existing = await prisma.reservation.findFirst({where: {userId: seed.user.id, placeId: savedPlaces[0]!.id, reservationDate, reservationTime: seed.time}});
+    const data = {
+      userId: seed.user.id,
+      placeId: savedPlaces[0]!.id,
+      reservationDate,
+      reservationTime: seed.time,
+      numberOfPersons: seed.persons,
+      status: seed.status,
+      occasion: seed.occasion,
+      seatingPreference: seed.persons > 3 ? 'Intérieur' : 'Terrasse',
+      allergies: seed.user.email === 'ines@barmej.app' ? ['Fruits à coque'] : [],
+      message: seed.status === ReservationStatus.PENDING ? 'Table calme si possible' : null,
+      proposedDate: seed.status === ReservationStatus.PROPOSED ? dateAt(seed.proposedDay) : null,
+      proposedTime: seed.status === ReservationStatus.PROPOSED ? seed.proposedTime : null,
+      proposalMessage: seed.status === ReservationStatus.PROPOSED ? 'Le créneau de 20h est complet. Nous vous proposons 20h30.' : null,
+      cancellationReason: seed.status === ReservationStatus.CANCELLED ? 'Changement de programme' : null,
+    };
+    createdProReservations.push(existing ? await prisma.reservation.update({where: {id: existing.id}, data}) : await prisma.reservation.create({data}));
+  }
+
+  const completed = createdProReservations.find(row => row.status === ReservationStatus.COMPLETED);
+  if (completed) {
+    await prisma.review.upsert({
+      where: {reservationId: completed.id},
+      update: {cuisineRating: 5, serviceRating: 4, ambianceRating: 5, priceRating: 4, comment: 'Très belle expérience, service attentionné et cadre agréable.', photos: [image('photo-1547592180-85f173990554')], establishmentResponse: 'Merci pour votre visite, au plaisir de vous revoir !', respondedAt: new Date()},
+      create: {reservationId: completed.id, userId: completed.userId, placeId: completed.placeId, cuisineRating: 5, serviceRating: 4, ambianceRating: 5, priceRating: 4, comment: 'Très belle expérience, service attentionné et cadre agréable.', photos: [image('photo-1547592180-85f173990554')], establishmentResponse: 'Merci pour votre visite, au plaisir de vous revoir !', respondedAt: new Date()},
+    });
+  }
+
+  for (const [index, customer] of customers.slice(1, 4).entries()) {
+    const reservationDate = dateAt(2);
+    const reservationTime = '20:00';
+    await prisma.waitlistEntry.upsert({
+      where: {userId_placeId_reservationDate_reservationTime: {userId: customer.id, placeId: savedPlaces[0]!.id, reservationDate, reservationTime}},
+      update: {numberOfPersons: index + 2, status: index === 0 ? WaitlistStatus.OFFERED : WaitlistStatus.WAITING, offerExpiresAt: index === 0 ? new Date(Date.now() + 15 * 60 * 1000) : null},
+      create: {userId: customer.id, placeId: savedPlaces[0]!.id, reservationDate, reservationTime, numberOfPersons: index + 2, status: index === 0 ? WaitlistStatus.OFFERED : WaitlistStatus.WAITING, offerExpiresAt: index === 0 ? new Date(Date.now() + 15 * 60 * 1000) : null},
+    });
+  }
+
   const notifications = [
     {title: 'Réservation confirmée', message: 'Votre table au Patio est confirmée pour vendredi à 20h.'},
     {title: 'Nouvelle adresse', message: 'Découvrez The Cliff, notre nouvelle sélection avec vue sur mer.'},
@@ -86,6 +240,6 @@ async function main() {
 }
 
 main()
-  .then(() => console.log('Données de démonstration ajoutées avec succès.'))
+  .then(() => console.log('Données Barmej et Barmej Pro ajoutées. Comptes: pro@barmej.app / Pro12345! ; clients / Client123!'))
   .finally(() => prisma.$disconnect());
 

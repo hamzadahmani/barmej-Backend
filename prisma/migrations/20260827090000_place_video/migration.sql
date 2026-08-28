@@ -1,0 +1,3 @@
+ALTER TYPE "PlaceMediaType" ADD VALUE 'VIDEO';
+
+ALTER TABLE "place_media" ADD COLUMN "duration" DOUBLE PRECISION;

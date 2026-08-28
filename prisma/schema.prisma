@@ -10,10 +10,13 @@ datasource db {
 enum UserRole {
   USER
   ADMIN
+  ESTABLISHMENT
+  SCANNER
 }
 
 enum ReservationStatus {
   PENDING
+  PROPOSED
   CONFIRMED
   CANCELLED
   DECLINED
@@ -35,77 +38,209 @@ enum GroupPlanStatus {
   CANCELLED
 }
 
+enum LoyaltyTransactionType {
+  EARN
+  REDEEM
+  ADJUST
+}
+
+enum LoyaltyRedemptionStatus {
+  PENDING
+  REDEEMED
+  EXPIRED
+  CANCELLED
+}
+
 model User {
-  id            Int            @id @default(autoincrement()) @map("id_user")
-  email         String         @unique @map("email")
-  passwordHash  String?        @map("password_hash")
-  firstName     String         @map("first_name")
-  lastName      String         @default("") @map("last_name")
-  mobile        String?        @map("mobile")
-  gender        String?        @map("gender")
-  photo         String?        @map("photo")
-  birthDate     DateTime?      @map("birth_date") @db.Date
-  role          UserRole       @default(USER)
-  externalId    String?        @unique @map("external_id")
-  latitude      Float?
-  longitude     Float?
-  deviceToken   String?        @map("device_token")
-  createdAt     DateTime       @default(now()) @map("created_at")
-  updatedAt     DateTime       @updatedAt @map("updated_at")
-  favorites     Favorite[]
-  reservations  Reservation[]
-  reports       Report[]
-  notifications Notification[]
-  reviews       Review[]
-  waitlistEntries WaitlistEntry[]
-  organizedPlans GroupPlan[] @relation("GroupPlanOrganizer")
-  groupVotes GroupVote[]
+  id                  Int                  @id @default(autoincrement()) @map("id_user")
+  email               String               @unique @map("email")
+  passwordHash        String?              @map("password_hash")
+  firstName           String               @map("first_name")
+  lastName            String               @default("") @map("last_name")
+  mobile              String?              @map("mobile")
+  gender              String?              @map("gender")
+  photo               String?              @map("photo")
+  birthDate           DateTime?            @map("birth_date") @db.Date
+  role                UserRole             @default(USER)
+  externalId          String?              @unique @map("external_id")
+  latitude            Float?
+  longitude           Float?
+  deviceToken         String?              @map("device_token")
+  dietaryPreferences  String[]             @default([]) @map("dietary_preferences")
+  allergies           String[]             @default([])
+  favoriteAmbiences   String[]             @default([]) @map("favorite_ambiences")
+  preferredBudget     Int?                 @map("preferred_budget")
+  createdAt           DateTime             @default(now()) @map("created_at")
+  updatedAt           DateTime             @updatedAt @map("updated_at")
+  favorites           Favorite[]
+  reservations        Reservation[]
+  reports             Report[]
+  notifications       Notification[]
+  reviews             Review[]
+  waitlistEntries     WaitlistEntry[]
+  organizedPlans      GroupPlan[]          @relation("GroupPlanOrganizer")
+  groupVotes          GroupVote[]
+  managedPlaces       PlaceManager[]
+  auditLogs           AuditLog[]
+  loyaltyAccounts     LoyaltyAccount[]
+  loyaltyTransactions LoyaltyTransaction[]
+  loyaltyRedemptions  LoyaltyRedemption[]
 
   @@map("users")
 }
 
 model Category {
-  id        Int      @id @default(autoincrement()) @map("id_category")
-  name      String
-  image     String?
-  createdAt DateTime @default(now()) @map("created_at")
-  places    Place[]
+  id              Int             @id @default(autoincrement()) @map("id_category")
+  name            String
+  image           String?
+  createdAt       DateTime        @default(now()) @map("created_at")
+  places          Place[]
+  placeCategories PlaceCategory[]
 
   @@map("categories")
 }
 
 model Place {
-  id            Int           @id @default(autoincrement()) @map("id_place")
-  categoryId    Int           @map("category_id")
-  name          String
-  subtitle      String?
-  image         String?
-  latitude      Float
-  longitude     Float
-  phone         String?
-  address       String?
-  email         String?
-  description   String?
-  outfit        String?
-  musicStyle    String?       @map("music_style")
-  happyHour     String?       @map("happy_hour")
-  schedule      String?
-  favorableDay  String?       @map("favorable_day")
-  favorableHour String?       @map("favorable_hour")
-  averagePrice  Int?          @map("average_price")
-  capacityPerSlot Int         @default(20) @map("capacity_per_slot")
-  createdAt     DateTime      @default(now()) @map("created_at")
-  updatedAt     DateTime      @updatedAt @map("updated_at")
-  category      Category      @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  favorites     Favorite[]
-  reservations  Reservation[]
-  reports       Report[]
-  reviews       Review[]
-  waitlistEntries WaitlistEntry[]
-  groupOptions  GroupOption[]
+  id                  Int                  @id @default(autoincrement()) @map("id_place")
+  categoryId          Int                  @map("category_id")
+  name                String
+  subtitle            String?
+  image               String?
+  latitude            Float
+  longitude           Float
+  phone               String?
+  address             String?
+  email               String?
+  description         String?
+  outfit              String?
+  musicStyle          String?              @map("music_style")
+  happyHour           String?              @map("happy_hour")
+  schedule            String?
+  favorableDay        String?              @map("favorable_day")
+  favorableHour       String?              @map("favorable_hour")
+  averagePrice        Int?                 @map("average_price")
+  capacityPerSlot     Int                  @default(20) @map("capacity_per_slot")
+  verified            Boolean              @default(false)
+  reviewsEnabled      Boolean              @default(true) @map("reviews_enabled")
+  cuisineType         String?              @map("cuisine_type")
+  ambienceTags        String[]             @default([]) @map("ambience_tags")
+  createdAt           DateTime             @default(now()) @map("created_at")
+  updatedAt           DateTime             @updatedAt @map("updated_at")
+  category            Category             @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  categories          PlaceCategory[]
+  favorites           Favorite[]
+  reservations        Reservation[]
+  reports             Report[]
+  reviews             Review[]
+  waitlistEntries     WaitlistEntry[]
+  groupOptions        GroupOption[]
+  openingHours        PlaceOpeningHour[]
+  closures            PlaceClosure[]
+  slotOverrides       PlaceSlotOverride[]
+  managers            PlaceManager[]
+  events              PlaceEvent[]
+  media               PlaceMedia[]
+  auditLogs           AuditLog[]
+  loyaltyProgram      LoyaltyProgram?
+  loyaltyAccounts     LoyaltyAccount[]
+  loyaltyTransactions LoyaltyTransaction[]
+  loyaltyRewards      LoyaltyReward[]
+  loyaltyRedemptions  LoyaltyRedemption[]
 
   @@index([categoryId])
   @@map("places")
+}
+
+enum PlaceMediaType {
+  COVER
+  GALLERY
+  VIDEO
+}
+
+model PlaceMedia {
+  id        Int            @id @default(autoincrement()) @map("id_media")
+  placeId   Int            @map("place_id")
+  publicId  String         @unique @map("public_id")
+  secureUrl String         @map("secure_url")
+  type      PlaceMediaType @default(GALLERY)
+  width     Int?
+  height    Int?
+  bytes     Int?
+  format    String?
+  duration  Float?
+  sortOrder Int            @default(0) @map("sort_order")
+  createdAt DateTime       @default(now()) @map("created_at")
+  place     Place          @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@index([placeId, type, sortOrder])
+  @@map("place_media")
+}
+
+model PlaceEvent {
+  id          Int       @id @default(autoincrement()) @map("id_event")
+  placeId     Int       @map("place_id")
+  title       String
+  description String
+  startDate   DateTime? @map("start_date") @db.Date
+  endDate     DateTime? @map("end_date") @db.Date
+  startTime   String?   @map("start_time")
+  endTime     String?   @map("end_time")
+  active      Boolean   @default(true)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  place       Place     @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@index([placeId, active])
+  @@map("place_events")
+}
+
+model PlaceCategory {
+  placeId    Int      @map("place_id")
+  categoryId Int      @map("category_id")
+  createdAt  DateTime @default(now()) @map("created_at")
+  place      Place    @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  category   Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@id([placeId, categoryId])
+  @@index([categoryId])
+  @@map("place_categories")
+}
+
+model PlaceOpeningHour {
+  id        Int     @id @default(autoincrement())
+  placeId   Int     @map("place_id")
+  weekday   Int
+  openTime  String? @map("open_time")
+  closeTime String? @map("close_time")
+  isClosed  Boolean @default(false) @map("is_closed")
+  place     Place   @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@unique([placeId, weekday])
+  @@map("place_opening_hours")
+}
+
+model PlaceClosure {
+  id      Int      @id @default(autoincrement())
+  placeId Int      @map("place_id")
+  date    DateTime @db.Date
+  reason  String?
+  place   Place    @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@unique([placeId, date])
+  @@map("place_closures")
+}
+
+model PlaceSlotOverride {
+  id       Int      @id @default(autoincrement())
+  placeId  Int      @map("place_id")
+  date     DateTime @db.Date
+  time     String
+  capacity Int?
+  isClosed Boolean  @default(false) @map("is_closed")
+  place    Place    @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@unique([placeId, date, time])
+  @@map("place_slot_overrides")
 }
 
 model Favorite {
@@ -121,22 +256,154 @@ model Favorite {
 }
 
 model Reservation {
-  id              Int               @id @default(autoincrement()) @map("id_reservation")
-  userId          Int               @map("user_id")
-  placeId         Int               @map("place_id")
-  reservationDate DateTime          @map("reservation_date") @db.Date
-  reservationTime String            @map("reservation_time")
-  numberOfPersons Int               @map("number_of_persons")
-  message         String?
-  status          ReservationStatus @default(PENDING)
-  createdAt       DateTime          @default(now()) @map("created_at")
-  updatedAt       DateTime          @updatedAt @map("updated_at")
-  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  place           Place             @relation(fields: [placeId], references: [id], onDelete: Restrict)
-  review          Review?
+  id                 Int                 @id @default(autoincrement()) @map("id_reservation")
+  userId             Int                 @map("user_id")
+  placeId            Int                 @map("place_id")
+  reservationDate    DateTime            @map("reservation_date") @db.Date
+  reservationTime    String              @map("reservation_time")
+  numberOfPersons    Int                 @map("number_of_persons")
+  message            String?
+  seatingPreference  String?             @map("seating_preference")
+  allergies          String[]            @default([])
+  occasion           String?
+  cancellationReason String?             @map("cancellation_reason")
+  status             ReservationStatus   @default(PENDING)
+  proposedDate       DateTime?           @map("proposed_date") @db.Date
+  proposedTime       String?             @map("proposed_time")
+  proposalMessage    String?             @map("proposal_message")
+  checkedInAt        DateTime?           @map("checked_in_at")
+  completedAt        DateTime?           @map("completed_at")
+  noShowMarkedAt     DateTime?           @map("no_show_marked_at")
+  createdAt          DateTime            @default(now()) @map("created_at")
+  updatedAt          DateTime            @updatedAt @map("updated_at")
+  user               User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  place              Place               @relation(fields: [placeId], references: [id], onDelete: Restrict)
+  review             Review?
+  loyaltyTransaction LoyaltyTransaction?
 
   @@index([userId])
+  @@index([placeId, reservationDate, reservationTime, status])
   @@map("reservations")
+}
+
+model AuditLog {
+  id         Int      @id @default(autoincrement()) @map("id_audit_log")
+  placeId    Int      @map("place_id")
+  actorId    Int      @map("actor_id")
+  action     String
+  entityType String   @map("entity_type")
+  entityId   Int?     @map("entity_id")
+  details    Json?
+  createdAt  DateTime @default(now()) @map("created_at")
+  place      Place    @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  actor      User     @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([placeId, createdAt])
+  @@index([actorId])
+  @@map("audit_logs")
+}
+
+model LoyaltyProgram {
+  id             Int             @id @default(autoincrement()) @map("id_loyalty_program")
+  placeId        Int             @unique @map("place_id")
+  enabled        Boolean         @default(true)
+  pointsPerVisit Int             @default(10) @map("points_per_visit")
+  rewardName     String          @default("Une récompense offerte") @map("reward_name")
+  rewardCost     Int             @default(100) @map("reward_cost")
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+  place          Place           @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  rewards        LoyaltyReward[]
+
+  @@map("loyalty_programs")
+}
+
+model LoyaltyReward {
+  id          Int                 @id @default(autoincrement()) @map("id_loyalty_reward")
+  programId   Int                 @map("program_id")
+  placeId     Int                 @map("place_id")
+  name        String
+  description String?
+  pointsCost  Int                 @map("points_cost")
+  active      Boolean             @default(true)
+  stock       Int?
+  expiresAt   DateTime?           @map("expires_at")
+  createdAt   DateTime            @default(now()) @map("created_at")
+  updatedAt   DateTime            @updatedAt @map("updated_at")
+  program     LoyaltyProgram      @relation(fields: [programId], references: [id], onDelete: Cascade)
+  place       Place               @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  redemptions LoyaltyRedemption[]
+
+  @@index([placeId, active, pointsCost])
+  @@map("loyalty_rewards")
+}
+
+model LoyaltyRedemption {
+  id         Int                     @id @default(autoincrement()) @map("id_loyalty_redemption")
+  userId     Int                     @map("user_id")
+  placeId    Int                     @map("place_id")
+  rewardId   Int                     @map("reward_id")
+  token      String                  @unique
+  status     LoyaltyRedemptionStatus @default(PENDING)
+  pointsCost Int                     @map("points_cost")
+  expiresAt  DateTime                @map("expires_at")
+  redeemedAt DateTime?               @map("redeemed_at")
+  createdAt  DateTime                @default(now()) @map("created_at")
+  updatedAt  DateTime                @updatedAt @map("updated_at")
+  user       User                    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  place      Place                   @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  reward     LoyaltyReward           @relation(fields: [rewardId], references: [id], onDelete: Restrict)
+
+  @@index([userId, status, expiresAt])
+  @@index([placeId, status])
+  @@map("loyalty_redemptions")
+}
+
+model LoyaltyAccount {
+  id             Int      @id @default(autoincrement()) @map("id_loyalty_account")
+  userId         Int      @map("user_id")
+  placeId        Int      @map("place_id")
+  balance        Int      @default(0)
+  lifetimePoints Int      @default(0) @map("lifetime_points")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  place          Place    @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, placeId])
+  @@index([placeId, balance])
+  @@map("loyalty_accounts")
+}
+
+model LoyaltyTransaction {
+  id            Int                    @id @default(autoincrement()) @map("id_loyalty_transaction")
+  userId        Int                    @map("user_id")
+  placeId       Int                    @map("place_id")
+  reservationId Int?                   @unique @map("reservation_id")
+  type          LoyaltyTransactionType
+  points        Int
+  note          String?
+  createdAt     DateTime               @default(now()) @map("created_at")
+  user          User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  place         Place                  @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  reservation   Reservation?           @relation(fields: [reservationId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([placeId, createdAt])
+  @@map("loyalty_transactions")
+}
+
+model PlaceManager {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  placeId   Int      @map("place_id")
+  createdAt DateTime @default(now()) @map("created_at")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  place     Place    @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, placeId])
+  @@index([placeId])
+  @@map("place_managers")
 }
 
 model Report {
@@ -152,54 +419,57 @@ model Report {
 }
 
 model Notification {
-  id        Int      @id @default(autoincrement())
-  userId    Int      @map("user_id")
-  title     String
-  message   String
-  read      Boolean  @default(false)
-  createdAt DateTime @default(now()) @map("created_at")
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id           Int      @id @default(autoincrement())
+  userId       Int      @map("user_id")
+  title        String
+  message      String
+  type         String   @default("GENERAL")
+  referenceKey String?  @map("reference_key")
+  read         Boolean  @default(false)
+  createdAt    DateTime @default(now()) @map("created_at")
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
+  @@unique([userId, type, referenceKey])
   @@index([userId, read])
   @@map("notifications")
 }
 
 model Review {
-  id              Int      @id @default(autoincrement())
-  reservationId   Int      @unique @map("reservation_id")
-  userId          Int      @map("user_id")
-  placeId         Int      @map("place_id")
-  cuisineRating   Int      @map("cuisine_rating")
-  serviceRating   Int      @map("service_rating")
-  ambianceRating  Int      @map("ambiance_rating")
-  priceRating     Int      @map("price_rating")
-  comment         String?
-  photos          String[] @default([])
-  establishmentResponse String? @map("establishment_response")
-  respondedAt     DateTime? @map("responded_at")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
-  reservation     Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
-  user            User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  place           Place @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  id                    Int         @id @default(autoincrement())
+  reservationId         Int         @unique @map("reservation_id")
+  userId                Int         @map("user_id")
+  placeId               Int         @map("place_id")
+  cuisineRating         Int         @map("cuisine_rating")
+  serviceRating         Int         @map("service_rating")
+  ambianceRating        Int         @map("ambiance_rating")
+  priceRating           Int         @map("price_rating")
+  comment               String?
+  photos                String[]    @default([])
+  establishmentResponse String?     @map("establishment_response")
+  respondedAt           DateTime?   @map("responded_at")
+  createdAt             DateTime    @default(now()) @map("created_at")
+  updatedAt             DateTime    @updatedAt @map("updated_at")
+  reservation           Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  user                  User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  place                 Place       @relation(fields: [placeId], references: [id], onDelete: Cascade)
 
   @@index([placeId, createdAt])
   @@map("reviews")
 }
 
 model WaitlistEntry {
-  id              Int      @id @default(autoincrement())
-  userId          Int      @map("user_id")
-  placeId         Int      @map("place_id")
-  reservationDate DateTime @map("reservation_date") @db.Date
-  reservationTime String   @map("reservation_time")
-  numberOfPersons Int      @map("number_of_persons")
+  id              Int            @id @default(autoincrement())
+  userId          Int            @map("user_id")
+  placeId         Int            @map("place_id")
+  reservationDate DateTime       @map("reservation_date") @db.Date
+  reservationTime String         @map("reservation_time")
+  numberOfPersons Int            @map("number_of_persons")
   status          WaitlistStatus @default(WAITING)
-  offerExpiresAt  DateTime? @map("offer_expires_at")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
-  user            User @relation(fields: [userId], references: [id], onDelete: Cascade)
-  place           Place @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  offerExpiresAt  DateTime?      @map("offer_expires_at")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  updatedAt       DateTime       @updatedAt @map("updated_at")
+  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  place           Place          @relation(fields: [placeId], references: [id], onDelete: Cascade)
 
   @@unique([userId, placeId, reservationDate, reservationTime])
   @@index([placeId, reservationDate, reservationTime, status])
@@ -207,30 +477,30 @@ model WaitlistEntry {
 }
 
 model GroupPlan {
-  id          Int      @id @default(autoincrement())
-  organizerId Int      @map("organizer_id")
-  title       String
-  inviteEmails String[] @default([]) @map("invite_emails")
-  status      GroupPlanStatus @default(VOTING)
-  votingEndsAt DateTime? @map("voting_ends_at")
-  selectedOptionId Int? @map("selected_option_id")
-  createdAt   DateTime @default(now()) @map("created_at")
-  updatedAt   DateTime @updatedAt @map("updated_at")
-  organizer   User @relation("GroupPlanOrganizer", fields: [organizerId], references: [id], onDelete: Cascade)
-  options     GroupOption[]
+  id               Int             @id @default(autoincrement())
+  organizerId      Int             @map("organizer_id")
+  title            String
+  inviteEmails     String[]        @default([]) @map("invite_emails")
+  status           GroupPlanStatus @default(VOTING)
+  votingEndsAt     DateTime?       @map("voting_ends_at")
+  selectedOptionId Int?            @map("selected_option_id")
+  createdAt        DateTime        @default(now()) @map("created_at")
+  updatedAt        DateTime        @updatedAt @map("updated_at")
+  organizer        User            @relation("GroupPlanOrganizer", fields: [organizerId], references: [id], onDelete: Cascade)
+  options          GroupOption[]
 
   @@index([organizerId, createdAt])
   @@map("group_plans")
 }
 
 model GroupOption {
-  id              Int      @id @default(autoincrement())
-  planId          Int      @map("plan_id")
-  placeId         Int      @map("place_id")
-  reservationDate DateTime @map("reservation_date") @db.Date
-  reservationTime String   @map("reservation_time")
-  plan            GroupPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
-  place           Place @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  id              Int         @id @default(autoincrement())
+  planId          Int         @map("plan_id")
+  placeId         Int         @map("place_id")
+  reservationDate DateTime    @map("reservation_date") @db.Date
+  reservationTime String      @map("reservation_time")
+  plan            GroupPlan   @relation(fields: [planId], references: [id], onDelete: Cascade)
+  place           Place       @relation(fields: [placeId], references: [id], onDelete: Cascade)
   votes           GroupVote[]
 
   @@unique([planId, placeId, reservationDate, reservationTime])
@@ -238,12 +508,12 @@ model GroupOption {
 }
 
 model GroupVote {
-  id        Int @id @default(autoincrement())
-  optionId  Int @map("option_id")
-  userId    Int @map("user_id")
-  createdAt DateTime @default(now()) @map("created_at")
+  id        Int         @id @default(autoincrement())
+  optionId  Int         @map("option_id")
+  userId    Int         @map("user_id")
+  createdAt DateTime    @default(now()) @map("created_at")
   option    GroupOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
-  user      User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([optionId, userId])
   @@map("group_votes")
