@@ -11,6 +11,8 @@ const schema = z.object({
   CLOUDINARY_CLOUD_NAME: z.string().trim().optional(),
   CLOUDINARY_API_KEY: z.string().trim().optional(),
   CLOUDINARY_API_SECRET: z.string().trim().optional(),
+  REDIS_URL: z.string().trim().optional(),
+  FEED_CACHE_TTL_SECONDS: z.coerce.number().int().min(5).max(300).default(30),
 });
 
 export const config = schema.parse(process.env);

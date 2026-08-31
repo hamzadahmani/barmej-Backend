@@ -1,4 +1,4 @@
-import {PrismaClient, ReservationStatus, UserRole, WaitlistStatus} from '@prisma/client';
+import {PlaceMediaType, PrismaClient, ReservationStatus, UserRole, WaitlistStatus} from '@prisma/client';
 import bcrypt from 'bcryptjs';
 
 const prisma = new PrismaClient();
@@ -70,6 +70,48 @@ async function main() {
     ]),
     skipDuplicates: true,
   });
+
+  // Vidéos publiques de démonstration pour tester le feed mobile. Une vidéo
+  // réellement publiée par un gérant reste toujours prioritaire et intacte.
+  const demoVideos = [
+    {place: savedPlaces[0]!, publicId: 'barmej/demo/le-patio', secureUrl: 'https://videos.pexels.com/video-files/6603839/6603839-hd_1080_1920_25fps.mp4', duration: 15, keywords: ['Cuisine méditerranéenne', 'Romantique', 'Terrasse']},
+    {place: savedPlaces[3]!, publicId: 'barmej/demo/the-cliff', secureUrl: 'https://videos.pexels.com/video-files/7008573/7008573-hd_1080_1920_25fps.mp4', duration: 15, keywords: ['Vue sur mer', 'Romantique', 'Terrasse']},
+    {place: savedPlaces[5]!, publicId: 'barmej/demo/cafe-des-arts', secureUrl: 'https://videos.pexels.com/video-files/7008582/7008582-hd_1080_1920_25fps.mp4', duration: 15, keywords: ['Petit-déjeuner', 'Brunch', 'Espace calme']},
+  ];
+  for (const video of demoVideos) {
+    const existingDemo = await prisma.placeMedia.findUnique({where: {publicId: video.publicId}});
+    if (existingDemo) {
+      await prisma.placeMedia.update({where: {id: existingDemo.id}, data: {secureUrl: video.secureUrl, duration: video.duration, format: 'mp4', keywords: video.keywords}});
+      continue;
+    }
+    const realVideo = await prisma.placeMedia.findFirst({where: {placeId: video.place.id, type: PlaceMediaType.VIDEO}});
+    if (!realVideo) await prisma.placeMedia.create({data: {placeId: video.place.id, publicId: video.publicId, secureUrl: video.secureUrl, type: PlaceMediaType.VIDEO, duration: video.duration, format: 'mp4', keywords: video.keywords, sortOrder: 0}});
+  }
+
+  const sponsoredVideo = await prisma.placeMedia.findUnique({where: {publicId: 'barmej/demo/le-patio'}});
+  if (sponsoredVideo) {
+    const startsAt = new Date();
+    startsAt.setUTCDate(startsAt.getUTCDate() - 1);
+    const endsAt = new Date();
+    endsAt.setUTCDate(endsAt.getUTCDate() + 30);
+    const campaignData = {
+      placeId: savedPlaces[0]!.id,
+      videoId: sponsoredVideo.id,
+      active: true,
+      startsAt,
+      endsAt,
+      dailyBudgetCents: 3000,
+      totalBudgetCents: 50000,
+      bidCpmCents: 800,
+      latitude: savedPlaces[0]!.latitude,
+      longitude: savedPlaces[0]!.longitude,
+      radiusKm: 40,
+      maxImpressionsPerUserDay: 2,
+    };
+    const existingCampaign = await prisma.sponsoredCampaign.findFirst({where: {name: 'Le Patio — Découverte locale'}});
+    if (existingCampaign) await prisma.sponsoredCampaign.update({where: {id: existingCampaign.id}, data: campaignData});
+    else await prisma.sponsoredCampaign.create({data: {...campaignData, name: 'Le Patio — Découverte locale'}});
+  }
 
   const proUser = await prisma.user.upsert({
     where: {email: 'pro@barmej.app'},

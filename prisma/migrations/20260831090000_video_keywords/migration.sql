@@ -1,0 +1,2 @@
+ALTER TABLE "place_media"
+ADD COLUMN "keywords" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];

@@ -51,6 +51,24 @@ enum LoyaltyRedemptionStatus {
   CANCELLED
 }
 
+enum FeedEventType {
+  FEED_IMPRESSION
+  VIDEO_START
+  VIDEO_25_PERCENT
+  VIDEO_50_PERCENT
+  VIDEO_75_PERCENT
+  VIDEO_COMPLETE
+  VIDEO_SKIP
+  VIDEO_REPLAY
+  PLACE_OPEN
+  FAVORITE_ADD
+  SHARE
+  RESERVATION_START
+  RESERVATION_CREATED
+  NOT_INTERESTED
+  REPORT
+}
+
 model User {
   id                  Int                  @id @default(autoincrement()) @map("id_user")
   email               String               @unique @map("email")
@@ -85,6 +103,8 @@ model User {
   loyaltyAccounts     LoyaltyAccount[]
   loyaltyTransactions LoyaltyTransaction[]
   loyaltyRedemptions  LoyaltyRedemption[]
+  feedEvents          FeedEvent[]
+  videoStates         UserVideoState[]
 
   @@map("users")
 }
@@ -146,6 +166,9 @@ model Place {
   loyaltyTransactions LoyaltyTransaction[]
   loyaltyRewards      LoyaltyReward[]
   loyaltyRedemptions  LoyaltyRedemption[]
+  feedEvents          FeedEvent[]
+  videoStates         UserVideoState[]
+  sponsoredCampaigns  SponsoredCampaign[]
 
   @@index([categoryId])
   @@map("places")
@@ -157,23 +180,122 @@ enum PlaceMediaType {
   VIDEO
 }
 
+enum MediaModerationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 model PlaceMedia {
-  id        Int            @id @default(autoincrement()) @map("id_media")
-  placeId   Int            @map("place_id")
-  publicId  String         @unique @map("public_id")
-  secureUrl String         @map("secure_url")
-  type      PlaceMediaType @default(GALLERY)
-  width     Int?
-  height    Int?
-  bytes     Int?
-  format    String?
-  duration  Float?
-  sortOrder Int            @default(0) @map("sort_order")
-  createdAt DateTime       @default(now()) @map("created_at")
-  place     Place          @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  id         Int              @id @default(autoincrement()) @map("id_media")
+  placeId    Int              @map("place_id")
+  publicId   String           @unique @map("public_id")
+  secureUrl  String           @map("secure_url")
+  type       PlaceMediaType   @default(GALLERY)
+  width      Int?
+  height     Int?
+  bytes      Int?
+  format     String?
+  duration   Float?
+  keywords   String[]         @default([])
+  active     Boolean          @default(true)
+  moderationStatus MediaModerationStatus @default(APPROVED) @map("moderation_status")
+  sortOrder  Int              @default(0) @map("sort_order")
+  createdAt  DateTime         @default(now()) @map("created_at")
+  place      Place            @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  feedEvents FeedEvent[]
+  userStates UserVideoState[]
+  sponsoredCampaigns SponsoredCampaign[]
 
   @@index([placeId, type, sortOrder])
+  @@index([type, active, moderationStatus])
   @@map("place_media")
+}
+
+model FeedEvent {
+  id         BigInt        @id @default(autoincrement())
+  eventId    String        @unique @map("event_id") @db.Uuid
+  userId     Int?          @map("user_id")
+  sessionId  String        @map("session_id") @db.VarChar(80)
+  videoId    Int           @map("video_id")
+  placeId    Int           @map("place_id")
+  type       FeedEventType
+  watchMs    Int?          @map("watch_ms")
+  positionMs Int?          @map("position_ms")
+  metadata   Json?
+  occurredAt DateTime      @map("occurred_at")
+  createdAt  DateTime      @default(now()) @map("created_at")
+  user       User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  video      PlaceMedia    @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  place      Place         @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@index([userId, occurredAt])
+  @@index([videoId, type, occurredAt])
+  @@index([placeId, occurredAt])
+  @@map("feed_events")
+}
+
+model UserVideoState {
+  userId         Int        @map("user_id")
+  videoId        Int        @map("video_id")
+  placeId        Int        @map("place_id")
+  firstSeenAt    DateTime   @default(now()) @map("first_seen_at")
+  lastSeenAt     DateTime   @default(now()) @map("last_seen_at")
+  totalWatchMs   Int        @default(0) @map("total_watch_ms")
+  completedCount Int        @default(0) @map("completed_count")
+  liked          Boolean    @default(false)
+  saved          Boolean    @default(false)
+  hidden         Boolean    @default(false)
+  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  video          PlaceMedia @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  place          Place      @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@id([userId, videoId])
+  @@index([userId, lastSeenAt])
+  @@index([placeId])
+  @@map("user_video_states")
+}
+
+model SponsoredCampaign {
+  id                       Int                   @id @default(autoincrement())
+  placeId                  Int                   @map("place_id")
+  videoId                  Int                   @map("video_id")
+  name                     String
+  active                   Boolean               @default(true)
+  startsAt                 DateTime              @map("starts_at")
+  endsAt                   DateTime              @map("ends_at")
+  dailyBudgetCents         Int                   @map("daily_budget_cents")
+  totalBudgetCents         Int                   @map("total_budget_cents")
+  bidCpmCents              Int                   @map("bid_cpm_cents")
+  latitude                 Float?
+  longitude                Float?
+  radiusKm                 Float?                @map("radius_km")
+  maxImpressionsPerUserDay Int                   @default(2) @map("max_impressions_per_user_day")
+  createdAt                DateTime              @default(now()) @map("created_at")
+  updatedAt                DateTime              @updatedAt @map("updated_at")
+  place                    Place                 @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  video                    PlaceMedia            @relation(fields: [videoId], references: [id], onDelete: Cascade)
+  impressions              SponsoredImpression[]
+
+  @@index([active, startsAt, endsAt])
+  @@index([placeId])
+  @@map("sponsored_campaigns")
+}
+
+model SponsoredImpression {
+  id         BigInt              @id @default(autoincrement())
+  campaignId Int                 @map("campaign_id")
+  userId     Int                 @map("user_id")
+  sessionId  String              @map("session_id") @db.VarChar(80)
+  videoId    Int                 @map("video_id")
+  clicked    Boolean             @default(false)
+  createdAt  DateTime            @default(now()) @map("created_at")
+  campaign   SponsoredCampaign   @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, userId, sessionId])
+  @@index([campaignId, createdAt])
+  @@index([userId, createdAt])
+  @@map("sponsored_impressions")
 }
 
 model PlaceEvent {

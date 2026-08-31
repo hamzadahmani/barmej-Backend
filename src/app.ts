@@ -5,13 +5,15 @@ import morgan from 'morgan';
 import bcrypt from 'bcryptjs';
 import {randomUUID} from 'node:crypto';
 import {z, ZodError} from 'zod';
-import {GroupPlanStatus, LoyaltyRedemptionStatus, LoyaltyTransactionType, PlaceMediaType, Prisma, ReservationStatus, UserRole, WaitlistStatus} from '@prisma/client';
+import {FeedEventType, GroupPlanStatus, LoyaltyRedemptionStatus, LoyaltyTransactionType, PlaceMediaType, Prisma, ReservationStatus, UserRole, WaitlistStatus} from '@prisma/client';
 import {v2 as cloudinary} from 'cloudinary';
 import {config} from './config';
 import {prisma} from './db';
 import {AuthRequest, requireAuth, signReservationTicket, signToken, verifyReservationTicket} from './auth';
 import {placeDto, placeInfoDto, userDto} from './mappers';
 import {markLateReservationsAsNoShow} from './reservationLifecycle';
+import {buildFeed} from './feed';
+import {cacheMode, consumeRateLimit, invalidateUserFeed, rememberSeenVideos} from './cache';
 
 export const app = express();
 app.disable('x-powered-by');
@@ -51,7 +53,11 @@ const eventDto = (event: any) => ({
   endTime: event.endTime ?? null,
   active: event.active,
 });
-const mediaDto = (media: any) => ({idMedia: media.id, idPlace: media.placeId, publicId: media.publicId, secureUrl: media.secureUrl, type: media.type, width: media.width, height: media.height, bytes: media.bytes, format: media.format, duration: media.duration, sortOrder: media.sortOrder});
+const mediaDto = (media: any) => ({idMedia: media.id, idPlace: media.placeId, publicId: media.publicId, secureUrl: media.secureUrl, type: media.type, width: media.width, height: media.height, bytes: media.bytes, format: media.format, duration: media.duration, keywords: media.keywords ?? [], sortOrder: media.sortOrder});
+const videoKeywordsSchema = z.array(z.string().trim().min(2).max(30)).length(3).transform(values => {
+  const unique = new Map(values.map(value => [value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(), value]));
+  return [...unique.values()];
+}).refine(values => values.length === 3, 'Ajoutez 3 mots-clés différents');
 const cloudinaryReady = () => Boolean(config.CLOUDINARY_CLOUD_NAME && config.CLOUDINARY_API_KEY && config.CLOUDINARY_API_SECRET);
 cloudinary.config({cloud_name: config.CLOUDINARY_CLOUD_NAME, api_key: config.CLOUDINARY_API_KEY, api_secret: config.CLOUDINARY_API_SECRET, secure: true});
 const ensureAdmin = async (req: Request, res: Response) => {
@@ -65,7 +71,7 @@ const ensureAdmin = async (req: Request, res: Response) => {
 
 app.get('/health', asyncRoute(async (_req, res) => {
   await prisma.$queryRaw`SELECT 1`;
-  return res.json({status: 'ok'});
+  return res.json({status: 'ok', feedCache: cacheMode()});
 }));
 
 const signupSchema = z.object({
@@ -154,6 +160,95 @@ app.get('/getFeaturedPlaces', asyncRoute(async (_req, res) => {
     take: 12,
   });
   return res.json(rows.map(placeDto));
+}));
+
+app.get('/video-feed', asyncRoute(async (_req, res) => {
+  const videos = await prisma.placeMedia.findMany({
+    where: {type: PlaceMediaType.VIDEO},
+    include: {place: {include: {categories: true}}},
+    orderBy: [{createdAt: 'desc'}, {id: 'desc'}],
+    take: 50,
+  });
+  return res.json(videos.map(video => ({
+    ...mediaDto(video),
+    place: placeDto(video.place),
+  })));
+}));
+
+app.get('/v1/feed', requireAuth, asyncRoute(async (req, res) => {
+  const rate = await consumeRateLimit(authId(req), 'feed-read', 120, 60);
+  res.setHeader('X-RateLimit-Remaining', rate.remaining);
+  if (!rate.allowed) return res.status(429).json({message: 'Trop de demandes. Réessayez dans quelques secondes.'});
+  const query = z.object({
+    cursor: z.string().max(2000).optional(),
+    limit: z.coerce.number().int().min(1).max(20).default(10),
+    latitude: z.coerce.number().min(-90).max(90).optional(),
+    longitude: z.coerce.number().min(-180).max(180).optional(),
+    mode: z.enum(['for-you', 'nearby']).default('for-you'),
+    keyword: z.string().trim().min(1).max(50).optional(),
+  }).parse(req.query);
+  return res.json(await buildFeed({userId: authId(req), ...query}));
+}));
+
+const feedEventsSchema = z.object({events: z.array(z.object({
+  eventId: z.string().uuid(),
+  sessionId: z.string().min(1).max(80),
+  videoId: z.number().int().positive(),
+  placeId: z.number().int().positive(),
+  type: z.nativeEnum(FeedEventType),
+  watchMs: z.number().int().min(0).max(3_600_000).optional(),
+  positionMs: z.number().int().min(0).max(3_600_000).optional(),
+  metadata: z.record(z.unknown()).optional(),
+  occurredAt: z.string().datetime(),
+})).min(1).max(50)});
+
+app.post('/v1/feed/events/batch', requireAuth, asyncRoute(async (req, res) => {
+  const rate = await consumeRateLimit(authId(req), 'feed-events', 180, 60);
+  res.setHeader('X-RateLimit-Remaining', rate.remaining);
+  if (!rate.allowed) return res.status(429).json({message: 'Trop d’événements envoyés. Réessayez dans quelques secondes.'});
+  const {events} = feedEventsSchema.parse(req.body);
+  const media = await prisma.placeMedia.findMany({where: {id: {in: events.map(event => event.videoId)}, type: PlaceMediaType.VIDEO}, select: {id: true, placeId: true}});
+  const validMedia = new Map(media.map(video => [video.id, video.placeId]));
+  const validEvents = events.filter(event => validMedia.get(event.videoId) === event.placeId);
+  const campaignIds = validEvents.map(event => Number(event.metadata?.campaignId)).filter(Number.isInteger);
+  const campaigns = await prisma.sponsoredCampaign.findMany({where: {id: {in: campaignIds}}, select: {id: true, videoId: true, placeId: true}});
+  const validCampaigns = new Map(campaigns.map(campaign => [campaign.id, campaign]));
+  await prisma.$transaction(async tx => {
+    await tx.feedEvent.createMany({data: validEvents.map(event => ({...event, userId: authId(req), occurredAt: new Date(event.occurredAt), metadata: event.metadata as Prisma.InputJsonValue | undefined})), skipDuplicates: true});
+    for (const event of validEvents) {
+      const isImpression = event.type === FeedEventType.FEED_IMPRESSION || event.type === FeedEventType.VIDEO_START;
+      const isComplete = event.type === FeedEventType.VIDEO_COMPLETE;
+      if (!isImpression && !isComplete && !event.watchMs) continue;
+      await tx.userVideoState.upsert({
+        where: {userId_videoId: {userId: authId(req), videoId: event.videoId}},
+        create: {userId: authId(req), videoId: event.videoId, placeId: event.placeId, totalWatchMs: event.watchMs ?? 0, completedCount: isComplete ? 1 : 0},
+        update: {lastSeenAt: new Date(event.occurredAt), totalWatchMs: {increment: event.watchMs ?? 0}, completedCount: {increment: isComplete ? 1 : 0}},
+      });
+    }
+    for (const event of validEvents) {
+      const campaignId = Number(event.metadata?.campaignId);
+      const campaign = validCampaigns.get(campaignId);
+      if (!campaign || campaign.videoId !== event.videoId || campaign.placeId !== event.placeId) continue;
+      if (event.type === FeedEventType.FEED_IMPRESSION) {
+        await tx.sponsoredImpression.upsert({
+          where: {campaignId_userId_sessionId: {campaignId, userId: authId(req), sessionId: event.sessionId}},
+          update: {},
+          create: {campaignId, userId: authId(req), sessionId: event.sessionId, videoId: event.videoId},
+        });
+      }
+      if (event.type === FeedEventType.PLACE_OPEN) {
+        await tx.sponsoredImpression.updateMany({
+          where: {campaignId, userId: authId(req), sessionId: event.sessionId},
+          data: {clicked: true},
+        });
+      }
+    }
+  });
+  const seenIds = validEvents
+    .filter(event => event.type === FeedEventType.FEED_IMPRESSION || event.type === FeedEventType.VIDEO_START || event.type === FeedEventType.VIDEO_COMPLETE)
+    .map(event => event.videoId);
+  await Promise.all([rememberSeenVideos(authId(req), seenIds), invalidateUserFeed(authId(req))]);
+  return res.status(202).json({accepted: validEvents.length, rejected: events.length - validEvents.length});
 }));
 
 app.get('/search', asyncRoute(async (req, res) => {
@@ -759,11 +854,13 @@ app.post('/pro/places/:placeId/media/complete', asyncRoute(async (req, res) => {
     bytes: z.coerce.number().int().positive().optional(),
     format: z.string().trim().max(20).optional(),
     duration: z.coerce.number().positive().max(60).optional(),
+    keywords: z.array(z.string()).optional(),
   }).parse(req.body);
   const expected = cloudinary.utils.api_sign_request({public_id: body.publicId, version: body.version}, config.CLOUDINARY_API_SECRET!);
   if (expected !== body.signature) return res.status(400).json({message: 'Réponse Cloudinary invalide'});
   if (!body.publicId.startsWith(`barmej/places/${placeId}/`)) return res.status(403).json({message: 'Ce média n’appartient pas à cet établissement'});
   const isVideo = body.type === 'VIDEO';
+  const keywords = isVideo ? videoKeywordsSchema.parse(body.keywords ?? []) : [];
   if (isVideo && !body.duration) {
     await cloudinary.uploader.destroy(body.publicId, {resource_type: 'video'}).catch(() => undefined);
     return res.status(400).json({message: 'La durée de la vidéo est obligatoire'});
@@ -786,12 +883,22 @@ app.post('/pro/places/:placeId/media/complete', asyncRoute(async (req, res) => {
   const secureUrl = cloudinary.url(body.publicId, {secure: true, version: body.version, format: body.format, resource_type: isVideo ? 'video' : 'image'});
   const media = await prisma.$transaction(async tx => {
     if (body.type === 'COVER') await tx.placeMedia.deleteMany({where: {placeId, type: PlaceMediaType.COVER}});
-    const created = await tx.placeMedia.upsert({where: {publicId: body.publicId}, update: {type: body.type, secureUrl, width: body.width, height: body.height, bytes: body.bytes, format: body.format, duration: body.duration}, create: {placeId, publicId: body.publicId, secureUrl, type: body.type, width: body.width, height: body.height, bytes: body.bytes, format: body.format, duration: body.duration}});
+    const created = await tx.placeMedia.upsert({where: {publicId: body.publicId}, update: {type: body.type, secureUrl, width: body.width, height: body.height, bytes: body.bytes, format: body.format, duration: body.duration, keywords}, create: {placeId, publicId: body.publicId, secureUrl, type: body.type, width: body.width, height: body.height, bytes: body.bytes, format: body.format, duration: body.duration, keywords}});
     if (body.type === 'COVER') await tx.place.update({where: {id: placeId}, data: {image: secureUrl}});
     return created;
   });
   if (previousCover && previousCover.publicId !== body.publicId) await cloudinary.uploader.destroy(previousCover.publicId, {invalidate: true}).catch(() => undefined);
   return res.status(201).json(mediaDto(media));
+}));
+
+app.patch('/pro/places/:placeId/media/:mediaId/keywords', asyncRoute(async (req, res) => {
+  const placeId = id(req.params.placeId);
+  if (!(await ensurePlaceAccess(req, res, placeId))) return;
+  const keywords = videoKeywordsSchema.parse(req.body?.keywords);
+  const media = await prisma.placeMedia.findFirst({where: {id: id(req.params.mediaId), placeId, type: PlaceMediaType.VIDEO}});
+  if (!media) return res.status(404).json({message: 'Vidéo introuvable'});
+  const updated = await prisma.placeMedia.update({where: {id: media.id}, data: {keywords}});
+  return res.json(mediaDto(updated));
 }));
 
 app.patch('/pro/places/:placeId/media/:mediaId/cover', asyncRoute(async (req, res) => {
@@ -1015,6 +1122,16 @@ app.get('/pro/statistics', asyncRoute(async (req, res) => {
     select: {userId: true, reservationDate: true, reservationTime: true, numberOfPersons: true, status: true},
     orderBy: [{reservationDate: 'asc'}, {reservationTime: 'asc'}],
   });
+  const [feedEvents, sponsoredImpressions] = await Promise.all([
+    prisma.feedEvent.findMany({
+      where: {placeId: query.placeId, occurredAt: {gte: start}},
+      select: {type: true, userId: true, videoId: true, watchMs: true, occurredAt: true},
+    }),
+    prisma.sponsoredImpression.findMany({
+      where: {campaign: {placeId: query.placeId}, createdAt: {gte: start}},
+      select: {clicked: true, createdAt: true},
+    }),
+  ]);
   const statusCounts = Object.values(ReservationStatus).reduce<Record<string, number>>((acc, status) => ({...acc, [status]: 0}), {});
   const dailyMap = new Map<string, {reservations: number; guests: number}>();
   const hourMap = new Map<string, number>();
@@ -1043,6 +1160,13 @@ app.get('/pro/statistics', asyncRoute(async (req, res) => {
   const completed = statusCounts.COMPLETED ?? 0;
   const uniqueCustomers = new Set(rows.map(row => row.userId)).size;
   const returningCustomers = [...new Set(rows.map(row => row.userId))].filter(userId => rows.filter(row => row.userId === userId).length > 1).length;
+  const feedCount = (type: FeedEventType) => feedEvents.filter(event => event.type === type).length;
+  const feedImpressions = feedCount(FeedEventType.FEED_IMPRESSION);
+  const videoStarts = feedCount(FeedEventType.VIDEO_START);
+  const videoCompletions = feedCount(FeedEventType.VIDEO_COMPLETE);
+  const placeOpens = feedCount(FeedEventType.PLACE_OPEN);
+  const totalWatchMs = feedEvents.reduce((sum, event) => sum + (event.watchMs ?? 0), 0);
+  const sponsoredClicks = sponsoredImpressions.filter(value => value.clicked).length;
   return res.json({
     periodDays: query.days,
     from: start.toISOString().slice(0, 10),
@@ -1062,6 +1186,21 @@ app.get('/pro/statistics', asyncRoute(async (req, res) => {
     daily: [...dailyMap.entries()].map(([date, value]) => ({date, ...value})),
     peakHours: [...hourMap.entries()].map(([time, guests]) => ({time, guests})).sort((a, b) => b.guests - a.guests).slice(0, 5),
     weekdays: [...weekdayMap.entries()].map(([day, value]) => ({day, ...value})).sort((a, b) => b.guests - a.guests),
+    feed: {
+      impressions: feedImpressions,
+      uniqueViewers: new Set(feedEvents.map(event => event.userId).filter(Boolean)).size,
+      videoStarts,
+      videoCompletions,
+      completionRate: videoStarts ? Math.round((videoCompletions / videoStarts) * 1000) / 10 : 0,
+      averageWatchSeconds: videoStarts ? Math.round((totalWatchMs / videoStarts / 1000) * 10) / 10 : 0,
+      placeOpens,
+      profileOpenRate: feedImpressions ? Math.round((placeOpens / feedImpressions) * 1000) / 10 : 0,
+      favorites: feedCount(FeedEventType.FAVORITE_ADD),
+      shares: feedCount(FeedEventType.SHARE),
+      sponsoredImpressions: sponsoredImpressions.length,
+      sponsoredClicks,
+      sponsoredCtr: sponsoredImpressions.length ? Math.round((sponsoredClicks / sponsoredImpressions.length) * 1000) / 10 : 0,
+    },
   });
 }));
 
