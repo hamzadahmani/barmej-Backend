@@ -4,3 +4,9 @@ dist/
 .env
 coverage/
 *.log
+
+# Downloaded OCR language cache
+*.traineddata
+
+# Sauvegardes locales
+_backup/

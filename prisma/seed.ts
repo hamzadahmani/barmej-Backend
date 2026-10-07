@@ -1,5 +1,6 @@
-import {PlaceMediaType, PrismaClient, ReservationStatus, UserRole, WaitlistStatus} from '@prisma/client';
+import {PlaceMediaType, PrismaClient, ReservationStatus, SubscriptionPlan, SubscriptionStatus, UserRole, VenueEnvironment, WaitlistStatus} from '@prisma/client';
 import bcrypt from 'bcryptjs';
+import {seedRealPlaces} from './realPlaces';
 
 const prisma = new PrismaClient();
 const image = (id: string) =>
@@ -16,6 +17,7 @@ async function main() {
     {id: 1, name: 'Restaurants', image: image('photo-1515003197210-e0cd71810b5f')},
     {id: 2, name: 'Cafés', image: image('photo-1501339847302-ac426a4a7cbb')},
     {id: 3, name: 'Sorties', image: image('photo-1514933651103-005eec06c04b')},
+    {id: 4, name: 'Maisons d’hôtes', image: image('photo-1566073771259-6a8506099945')},
   ];
   await Promise.all(
     categoryData.map(data =>
@@ -55,12 +57,37 @@ async function main() {
     {name: 'Le Carpe Diem', subtitle: 'Club et restaurant', image: image('photo-1571266028243-d220c9c3b2d2'), latitude: 36.9086, longitude: 10.2849, categoryId: 3, address: 'Route de Gammarth', schedule: '20:00 - 04:00', description: 'Dîner, spectacles et soirées dansantes.', outfit: 'Élégant', musicStyle: 'Électro,Commercial'},
     {name: 'Le Plug', subtitle: 'Bar à cocktails', image: image('photo-1514933651103-005eec06c04b'), latitude: 36.846, longitude: 10.28, categoryId: 3, address: 'Lac 2, Tunis', schedule: '17:00 - 02:00', description: 'Cocktails créatifs, tapas et DJ sets.', outfit: 'Smart casual', musicStyle: 'Hip-hop,House'},
     {name: 'Agora', subtitle: 'Cinéma et espace culturel', image: image('photo-1489599849927-2ee91cede3ba'), latitude: 36.8822, longitude: 10.3318, categoryId: 3, address: 'La Marsa, Tunis', schedule: '10:00 - 23:30', description: 'Cinéma indépendant et événements artistiques.', outfit: 'Décontracté', musicStyle: 'Varié'},
+    {name: 'Saint Tropez — Démo', subtitle: 'Brunch à La Marsa', image: image('photo-1533777857889-4be7c70b33f7'), latitude: 36.8792, longitude: 10.3247, categoryId: 2, address: 'La Marsa, Tunis', schedule: '08:00 - 18:00', description: 'Fiche de démonstration inspirée d’une adresse de brunch tunisienne. Informations à confirmer.', outfit: 'Décontracté', musicStyle: 'Acoustique'},
+    {name: 'GSX Skatepark — Démo', subtitle: 'Skateboard et sports urbains', image: image('photo-1520045892732-304bc3ac5d8e'), latitude: 35.8588, longitude: 10.5982, categoryId: 3, address: 'Hammam Sousse, Sousse', schedule: '09:00 - 20:00', description: 'Fiche de démonstration inspirée de Génération Sports X-trêmes. Informations à confirmer.', outfit: 'Sport', musicStyle: 'Urbain'},
+    {name: 'The Nine — Démo', subtitle: 'Bistro, terrasse et ambiance du soir', image: image('photo-1519167758481-83f550bb49b3'), latitude: 36.8618, longitude: 10.2832, categoryId: 3, address: 'Route de La Marsa, Tunis', schedule: '12:00 - 01:00', description: 'Fiche de démonstration inspirée d’un complexe de restauration et de loisirs à Tunis Nord. Informations à confirmer.', outfit: 'Smart casual', musicStyle: 'Lounge,Live'},
   ];
+
+  const interestKeywordsByPlace: Record<string, string[]> = {
+    'Dar El Jeld': ['restaurant', 'culture'],
+    'Bambalouni & Co': ['fast_food', 'street food'],
+    'Café des Arts': ['cafe', 'pastry', 'culture'],
+    'Flamingo Café': ['cafe', 'brunch'],
+    'Yüka': ['nightlife', 'live'],
+    'Agora': ['cinema', 'culture', 'leisure'],
+    'Saint Tropez — Démo': ['brunch', 'cafe'],
+    'Gourmandise La Marsa — Démo': ['pastry', 'cafe'],
+    'Escape Room Tunisia — Démo': ['gaming', 'leisure'],
+    'Pathé Tunis City — Démo': ['cinema', 'leisure'],
+    'GSX Skatepark — Démo': ['sport', 'leisure'],
+    'Café Saf-Saf — Démo': ['walks', 'cafe'],
+    'The Nine — Démo': ['nightlife', 'restaurant'],
+  };
+  const researchedDemoPlaces = new Set([
+    'Saint Tropez — Démo', 'Gourmandise La Marsa — Démo', 'Escape Room Tunisia — Démo',
+    'Pathé Tunis City — Démo', 'GSX Skatepark — Démo', 'Café Saf-Saf — Démo', 'The Nine — Démo',
+  ]);
 
   const savedPlaces = [];
   for (const place of places) {
     const existing = await prisma.place.findFirst({where: {name: place.name}});
-    const data = {...place, phone: '+216 70 000 000', email: 'contact@barmej.app', averagePrice: place.categoryId === 2 ? 18 : place.categoryId === 1 ? 55 : 40, capacityPerSlot: place.categoryId === 2 ? 16 : 30, verified: true, cuisineType: place.categoryId === 1 ? 'Méditerranéenne' : place.categoryId === 2 ? 'Café et brunch' : 'Sorties', ambienceTags: place.categoryId === 1 ? ['Romantique', 'Familial'] : place.categoryId === 2 ? ['Calme', 'Brunch'] : ['Musique', 'Festif']};
+    const outdoors = ['The Cliff', 'Blue Café', 'La Terrasse', 'Yüka'].includes(place.name);
+    const interestKeywords = interestKeywordsByPlace[place.name] ?? [];
+    const data = {...place, phone: '+216 70 000 000', email: 'demo@barmej.app', averagePrice: place.categoryId === 2 ? 18 : place.categoryId === 1 ? 55 : 40, capacityPerSlot: place.categoryId === 2 ? 16 : 30, verified: !researchedDemoPlaces.has(place.name), cuisineType: interestKeywords.join(', ') || (place.categoryId === 1 ? 'Méditerranéenne' : place.categoryId === 2 ? 'Café et brunch' : 'Sorties'), ambienceTags: [...(place.categoryId === 1 ? ['Romantique', 'Familial'] : place.categoryId === 2 ? ['Calme', 'Brunch'] : ['Musique', 'Festif']), ...interestKeywords], suitabilityMoods: place.categoryId === 1 ? ['romantique', 'familial', 'decouverte'] : place.categoryId === 2 ? ['calme', 'romantique', 'decouverte'] : ['festif', 'amis', 'decouverte'], groupTypes: place.categoryId === 1 ? ['couple', 'famille', 'amis'] : ['couple', 'amis', 'solo'], environment: outdoors ? VenueEnvironment.MIXED : VenueEnvironment.INDOOR, weatherSensitive: outdoors, defaultDurationMin: place.categoryId === 1 ? 90 : 60};
     savedPlaces.push(existing ? await prisma.place.update({where: {id: existing.id}, data}) : await prisma.place.create({data}));
   }
   await prisma.placeCategory.createMany({
@@ -70,6 +97,18 @@ async function main() {
     ]),
     skipDuplicates: true,
   });
+
+  // Lieux réels du Grand Tunis (sources publiques, à confirmer) : voir prisma/realPlaces.ts.
+  const realPlaceRows = await seedRealPlaces(prisma);
+  console.log(`${realPlaceRows.length} lieux réels ajoutés ou mis à jour.`);
+
+  const agora = savedPlaces.find(place => place.name === 'Agora');
+  if (agora) {
+    const existing = await prisma.experience.findFirst({where: {placeId: agora.id, name: 'Séance cinéma'}});
+    const experience = {placeId: agora.id, name: 'Séance cinéma', description: 'Film selon la programmation du jour.', category: 'activity', price: 18, durationMin: 120, suitabilityMoods: ['romantique', 'calme', 'familial'], groupTypes: ['couple', 'amis', 'famille', 'solo'], keywords: ['cinéma', 'culture', 'indoor'], environment: VenueEnvironment.INDOOR};
+    if (existing) await prisma.experience.update({where: {id: existing.id}, data: experience});
+    else await prisma.experience.create({data: experience});
+  }
 
   // Vidéos publiques de démonstration pour tester le feed mobile. Une vidéo
   // réellement publiée par un gérant reste toujours prioritaire et intacte.
@@ -119,6 +158,20 @@ async function main() {
     create: {email: 'pro@barmej.app', passwordHash: await bcrypt.hash('Pro12345!', 12), firstName: 'Gérant', lastName: 'Le Patio', mobile: '70000000', role: UserRole.ESTABLISHMENT},
   });
   await prisma.placeManager.upsert({where: {userId_placeId: {userId: proUser.id, placeId: savedPlaces[0]!.id}}, update: {}, create: {userId: proUser.id, placeId: savedPlaces[0]!.id}});
+  for (const [index, place] of savedPlaces.entries()) {
+    const premiumDemo = index === 0;
+    await prisma.establishmentSubscription.upsert({
+      where: {placeId: place.id},
+      update: premiumDemo ? {plan: SubscriptionPlan.PREMIUM, status: SubscriptionStatus.ACTIVE} : {},
+      create: {
+        placeId: place.id,
+        plan: premiumDemo ? SubscriptionPlan.PREMIUM : SubscriptionPlan.DISCOVERY,
+        status: SubscriptionStatus.ACTIVE,
+        startsAt: new Date(),
+        activatedAt: new Date(),
+      },
+    });
+  }
   const scannerUser = await prisma.user.upsert({
     where: {email: 'scanner.patio@barmej.app'},
     update: {role: UserRole.SCANNER, firstName: 'Portier', lastName: 'Le Patio'},

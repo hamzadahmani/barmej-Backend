@@ -1,3 +1,6 @@
+import {createMenuRouter} from './menus';
+import {hideDemoLabels} from './demoLabels';
+import {proPlaceSchema, placeProfileUpdate} from './placeProfile';
 import express, {NextFunction, Request, Response} from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -5,21 +8,29 @@ import morgan from 'morgan';
 import bcrypt from 'bcryptjs';
 import {randomUUID} from 'node:crypto';
 import {z, ZodError} from 'zod';
-import {FeedEventType, GroupPlanStatus, LoyaltyRedemptionStatus, LoyaltyTransactionType, PlaceMediaType, Prisma, ReservationStatus, UserRole, WaitlistStatus} from '@prisma/client';
+import {FeedEventType, GroupPlanStatus, LoyaltyRedemptionStatus, LoyaltyTransactionType, PlaceMediaType, Prisma, ReservationStatus, SubscriptionPlan, UserRole, WaitlistStatus} from '@prisma/client';
 import {v2 as cloudinary} from 'cloudinary';
 import {config} from './config';
 import {prisma} from './db';
-import {AuthRequest, requireAuth, signReservationTicket, signToken, verifyReservationTicket} from './auth';
+import {AuthRequest, createSessionTokens, requireAuth, revokeRefreshToken, rotateRefreshToken, signReservationTicket, verifyReservationTicket} from './auth';
 import {placeDto, placeInfoDto, userDto} from './mappers';
 import {markLateReservationsAsNoShow} from './reservationLifecycle';
 import {buildFeed} from './feed';
 import {cacheMode, consumeRateLimit, invalidateUserFeed, rememberSeenVideos} from './cache';
+import {minimumPlanForFeature, subscriptionAllows, subscriptionCatalog, subscriptionDto, SubscriptionFeature} from './subscriptions';
+import {barmejliRouter} from './barmejli';
+import {staysRouter} from './stays';
+import {canMoveStay, roomsLeft} from './staysLogic';
+import {interestCatalog, interestKeys} from './interests';
+import {discoveryRouter} from './discovery';
+import {reviewSummary} from './discoveryLogic';
 
 export const app = express();
 app.disable('x-powered-by');
 app.use(helmet());
 app.use(cors({origin: config.CORS_ORIGIN === '*' ? true : config.CORS_ORIGIN.split(',')}));
 app.use(express.json({limit: '8mb'}));
+app.use(hideDemoLabels);
 if (config.NODE_ENV !== 'test') app.use(morgan('combined'));
 
 const asyncRoute = (handler: (req: Request, res: Response) => Promise<unknown>) =>
@@ -97,7 +108,7 @@ app.post('/signup', asyncRoute(async (req, res) => {
     photo: body.userPhoto,
     birthDate: body.dateOfBirth ? dateOnly(body.dateOfBirth) : undefined,
   }});
-  return res.status(201).json({token: signToken(user.id), ...userDto(user)});
+  return res.status(201).json({...await createSessionTokens(user.id), ...userDto(user)});
 }));
 
 app.post('/authenticate', asyncRoute(async (req, res) => {
@@ -106,7 +117,7 @@ app.post('/authenticate', asyncRoute(async (req, res) => {
   if (!user?.passwordHash || !(await bcrypt.compare(body.userPwd, user.passwordHash))) {
     return res.status(401).json({message: 'Email ou mot de passe incorrect'});
   }
-  return res.json({token: signToken(user.id), ...userDto(user)});
+  return res.json({...await createSessionTokens(user.id), ...userDto(user)});
 }));
 
 app.post('/auth-external', asyncRoute(async (req, res) => {
@@ -132,7 +143,20 @@ app.post('/auth-external', asyncRoute(async (req, res) => {
     update: {externalId: source.id, photo: source.photo},
     create: {email, externalId: source.id, firstName: names.shift() || 'Utilisateur', lastName: names.join(' '), photo: source.photo},
   });
-  return res.json({token: signToken(user.id), ...userDto(user)});
+  return res.json({...await createSessionTokens(user.id), ...userDto(user)});
+}));
+
+app.post('/auth/refresh', asyncRoute(async (req, res) => {
+  const {refreshToken} = z.object({refreshToken: z.string().min(32)}).parse(req.body);
+  const tokens = await rotateRefreshToken(refreshToken);
+  if (!tokens) return res.status(401).json({message: 'Session expirée. Reconnectez-vous.'});
+  return res.json(tokens);
+}));
+
+app.post('/auth/logout', asyncRoute(async (req, res) => {
+  const {refreshToken} = z.object({refreshToken: z.string().min(32)}).parse(req.body);
+  await revokeRefreshToken(refreshToken);
+  return res.status(204).send();
 }));
 
 app.get('/getAllCategories', asyncRoute(async (_req, res) => {
@@ -158,8 +182,9 @@ app.get('/getFeaturedPlaces', asyncRoute(async (_req, res) => {
   const rows = await prisma.place.findMany({
     orderBy: [{updatedAt: 'desc'}, {name: 'asc'}],
     take: 12,
+    include: {reviews: {select: {cuisineRating: true, serviceRating: true, ambianceRating: true, priceRating: true}}},
   });
-  return res.json(rows.map(placeDto));
+  return res.json(rows.map(place => ({...placeDto(place), ...reviewSummary(place.reviewsEnabled, place.reviews)})));
 }));
 
 app.get('/video-feed', asyncRoute(async (_req, res) => {
@@ -256,14 +281,14 @@ app.get('/search', asyncRoute(async (req, res) => {
   const terms = query.query.toLowerCase().split(/\s+/).filter(Boolean);
   let rows = await prisma.place.findMany({where: {
     ...(query.categoryId ? {categories: {some: {categoryId: query.categoryId}}} : {}),
-    ...(query.maxPrice ? {OR: [{averagePrice: null}, {averagePrice: {lte: query.maxPrice}}]} : {}),
+    ...(query.maxPrice ? {averagePrice: {lte: query.maxPrice}} : {}),
     ...(query.cuisine ? {cuisineType: {contains: query.cuisine, mode: 'insensitive'}} : {}),
     ...(query.ambience ? {ambienceTags: {has: query.ambience}} : {}),
     ...(query.verified === 'true' ? {verified: true} : {}),
     ...(terms.length ? {AND: terms.map(term => ({OR: [{name: {contains: term, mode: 'insensitive'}}, {subtitle: {contains: term, mode: 'insensitive'}}, {address: {contains: term, mode: 'insensitive'}}, {description: {contains: term, mode: 'insensitive'}}, {cuisineType: {contains: term, mode: 'insensitive'}}, {ambienceTags: {has: term}}]}))} : {}),
   }, include: {categories: true, reviews: {select: {cuisineRating: true, serviceRating: true, ambianceRating: true, priceRating: true}}}, take: 50});
   let results = rows.map(place => {const rating = place.reviewsEnabled && place.reviews.length ? place.reviews.reduce((sum, review) => sum + (review.cuisineRating + review.serviceRating + review.ambianceRating + review.priceRating) / 4, 0) / place.reviews.length : null; const distance = query.latitude !== undefined && query.longitude !== undefined ? 6371 * Math.acos(Math.min(1, Math.cos(query.latitude * Math.PI / 180) * Math.cos(place.latitude * Math.PI / 180) * Math.cos((place.longitude - query.longitude) * Math.PI / 180) + Math.sin(query.latitude * Math.PI / 180) * Math.sin(place.latitude * Math.PI / 180))) : null; return {...placeDto(place), averagePrice: place.averagePrice, rating: rating ? Math.round(rating * 10) / 10 : null, reviewCount: place.reviewsEnabled ? place.reviews.length : 0, distance};});
-  const now = new Date(); const availabilityDate = query.date ?? (query.openNow === 'true' ? now.toISOString().slice(0, 10) : undefined); const availabilityTime = query.time ?? (query.openNow === 'true' ? `${String(now.getHours()).padStart(2, '0')}:${now.getMinutes() < 30 ? '00' : '30'}` : undefined);
+  const nextSlot = new Date(Math.ceil((Date.now() + 1) / 1800000) * 1800000); const availabilityDate = query.date ?? (query.openNow === 'true' ? nextSlot.toISOString().slice(0, 10) : undefined); const availabilityTime = query.time ?? (query.openNow === 'true' ? nextSlot.toISOString().slice(11, 16) : undefined);
   if (availabilityDate && availabilityTime) {const checks = await Promise.all(results.map(async place => {const availability = await getAvailability(prisma, place.idPlace, availabilityDate, query.guests); return availability?.slots.some((slot: any) => slot.time === availabilityTime && slot.available) ? place : null;})); results = checks.filter(Boolean) as typeof results;}
   results.sort((a, b) => query.sort === 'price' ? (a.averagePrice ?? 99999) - (b.averagePrice ?? 99999) : query.sort === 'name' ? a.placeName.localeCompare(b.placeName) : query.sort === 'distance' ? (a.distance ?? 99999) - (b.distance ?? 99999) : (b.rating ?? 0) - (a.rating ?? 0));
   return res.json(results);
@@ -343,6 +368,25 @@ app.get('/tickets/:token', asyncRoute(async (req, res) => {
 }));
 
 app.use(requireAuth);
+app.use('/v1/barmejli', barmejliRouter);
+app.use('/v1/stays', staysRouter);
+
+app.get('/interest-categories', (_req, res) => res.json(interestCatalog));
+
+app.put('/me/interests', asyncRoute(async (req, res) => {
+  const body = z.object({interests: z.array(z.string()).min(3).max(12)}).parse(req.body);
+  const interests = [...new Set(body.interests)];
+  if (interests.length < 3 || interests.some(value => !interestKeys.has(value))) {
+    return res.status(400).json({message: 'Choisissez au moins 3 centres d’intérêt valides'});
+  }
+  const user = await prisma.user.update({where: {id: authId(req)}, data: {interests, onboardingCompletedAt: new Date()}});
+  return res.json(userDto(user));
+}));
+
+app.post('/me/interests/skip', asyncRoute(async (req, res) => {
+  const user = await prisma.user.update({where: {id: authId(req)}, data: {onboardingCompletedAt: new Date()}});
+  return res.json(userDto(user));
+}));
 
 app.get('/getUserById', asyncRoute(async (req, res) => {
   const user = await prisma.user.findUniqueOrThrow({where: {id: authId(req)}});
@@ -415,6 +459,20 @@ const ensurePlaceAccess = async (req: Request, res: Response, placeId: number) =
   res.status(403).json({message: 'Vous ne gérez pas cet établissement'});
   return false;
 };
+const ensureSubscriptionFeature = async (req: Request, res: Response, placeId: number, feature: SubscriptionFeature) => {
+  const user = await prisma.user.findUnique({where: {id: authId(req)}, select: {role: true}});
+  if (user?.role === UserRole.ADMIN) return true;
+  const subscription = await prisma.establishmentSubscription.upsert({where: {placeId}, update: {}, create: {placeId, plan: SubscriptionPlan.DISCOVERY}});
+  if (subscriptionAllows(subscription.plan, subscription.status, feature)) return true;
+  res.status(403).json({
+    code: 'SUBSCRIPTION_FEATURE_REQUIRED',
+    message: `Cette fonctionnalité nécessite la formule ${subscriptionCatalog.find(item => item.plan === minimumPlanForFeature(feature))?.label}.`,
+    feature,
+    currentPlan: subscription.plan,
+    requiredPlan: minimumPlanForFeature(feature),
+  });
+  return false;
+};
 const ensureScannerAccess = async (req: Request, res: Response, placeId: number) => {
   const user = await prisma.user.findUnique({where: {id: authId(req)}, select: {role: true}});
   if (user?.role === UserRole.ADMIN) return true;
@@ -476,11 +534,14 @@ const getAvailability = async (db: any, placeId: number, date: string, guests: n
     const remainingCapacity = Math.max(0, capacity - used);
     const isPast = reservationMoment(date, time).getTime() <= Date.now();
     const isClosed = Boolean(override?.isClosed);
-    const status = isPast ? 'PAST' : isClosed ? 'CLOSED' : remainingCapacity < guests ? 'FULL' : remainingCapacity <= Math.max(2, Math.ceil(capacity * 0.25)) ? 'LIMITED' : 'AVAILABLE';
+    const status = isClosed ? 'CLOSED' : isPast ? 'PAST' : remainingCapacity < guests ? 'FULL' : remainingCapacity <= Math.max(2, Math.ceil(capacity * 0.25)) ? 'LIMITED' : 'AVAILABLE';
     slots.push({time, capacity, occupied: used, remainingCapacity, status, available: status === 'AVAILABLE' || status === 'LIMITED'});
   }
   return {placeId, placeName: place.name, date, isClosed: !slots.length, closureReason: slots.length ? null : 'Fermé ce jour', capacityPerSlot: place.capacityPerSlot, guests, slots};
 };
+
+app.use('/pro/places/:placeId/menus', createMenuRouter(ensurePlaceAccess));
+app.use('/v1/discovery', discoveryRouter(getAvailability));
 
 app.get('/places/:placeId/availability', asyncRoute(async (req, res) => {
   const query = z.object({
@@ -664,36 +725,46 @@ app.get('/pro/me', asyncRoute(async (req, res) => {
   return res.json({...userDto(user), places: places.map(placeDto)});
 }));
 
-const nullableText = (max: number) => z.union([z.string().trim().max(max), z.null()]).optional();
-const proPlaceSchema = z.object({
-  categoryIds: z.array(z.coerce.number().int().positive()).min(1).max(8),
-  name: z.string().trim().min(2).max(120),
-  subtitle: nullableText(180),
-  image: z.union([z.string().trim().url('URL de photo invalide').max(2000), z.literal(''), z.null()]).optional(),
-  latitude: z.coerce.number().min(-90).max(90),
-  longitude: z.coerce.number().min(-180).max(180),
-  phone: nullableText(40),
-  address: nullableText(300),
-  email: z.union([z.string().trim().email('Email invalide'), z.literal(''), z.null()]).optional(),
-  description: nullableText(3000),
-  outfit: nullableText(200),
-  musicStyle: nullableText(200),
-  happyHour: nullableText(200),
-  schedule: nullableText(200),
-  favorableDay: nullableText(100),
-  favorableHour: nullableText(100),
-  averagePrice: z.union([z.coerce.number().int().min(0).max(10000), z.null()]).optional(),
-  capacityPerSlot: z.coerce.number().int().min(1).max(500),
-  cuisineType: nullableText(120),
-  ambienceTags: z.array(z.string().trim().min(1).max(50)).max(12).default([]),
-});
-
 app.get('/pro/places/:placeId', asyncRoute(async (req, res) => {
   const placeId = id(req.params.placeId);
   if (!(await ensurePlaceAccess(req, res, placeId))) return;
   const place = await prisma.place.findUnique({where: {id: placeId}, include: {categories: true}});
   if (!place) return res.status(404).json({message: 'Établissement introuvable'});
   return res.json(placeDto(place));
+}));
+
+app.get('/pro/places/:placeId/subscription', asyncRoute(async (req, res) => {
+  const placeId = id(req.params.placeId);
+  if (!(await ensureScannerAccess(req, res, placeId))) return;
+  const place = await prisma.place.findUnique({where: {id: placeId}, select: {id: true}});
+  if (!place) return res.status(404).json({message: 'Établissement introuvable'});
+  const subscription = await prisma.establishmentSubscription.upsert({
+    where: {placeId},
+    update: {},
+    create: {placeId, plan: SubscriptionPlan.DISCOVERY},
+  });
+  return res.json({subscription: subscriptionDto(subscription), catalog: subscriptionCatalog});
+}));
+
+app.post('/pro/places/:placeId/subscription/request', asyncRoute(async (req, res) => {
+  const placeId = id(req.params.placeId);
+  if (!(await ensurePlaceAccess(req, res, placeId))) return;
+  const {plan} = z.object({plan: z.nativeEnum(SubscriptionPlan)}).parse(req.body);
+  const current = await prisma.establishmentSubscription.upsert({
+    where: {placeId},
+    update: {},
+    create: {placeId, plan: SubscriptionPlan.DISCOVERY},
+  });
+  if (plan === current.plan) return res.status(409).json({message: 'Cette formule est déjà active'});
+  const subscription = await prisma.establishmentSubscription.update({
+    where: {placeId},
+    data: {requestedPlan: plan, requestedAt: new Date()},
+  });
+  await audit(req, placeId, 'REQUEST', 'SUBSCRIPTION', subscription.id, {currentPlan: current.plan, requestedPlan: plan});
+  return res.status(202).json({
+    message: 'Demande envoyée. L’activation sera effectuée par l’administrateur Barmej.',
+    subscription: subscriptionDto(subscription),
+  });
 }));
 
 app.get('/pro/places/:placeId/completion', asyncRoute(async (req, res) => {
@@ -726,30 +797,7 @@ app.put('/pro/places/:placeId', asyncRoute(async (req, res) => {
   const categoryIds = [...new Set(body.categoryIds)];
   const categoryCount = await prisma.category.count({where: {id: {in: categoryIds}}});
   if (categoryCount !== categoryIds.length) return res.status(400).json({message: 'Une ou plusieurs catégories sont invalides'});
-  const clean = (value?: string | null) => value?.trim() || null;
-  const place = await prisma.place.update({where: {id: placeId}, data: {
-    categoryId: categoryIds[0],
-    name: body.name,
-    subtitle: clean(body.subtitle),
-    image: clean(body.image),
-    latitude: body.latitude,
-    longitude: body.longitude,
-    phone: clean(body.phone),
-    address: clean(body.address),
-    email: clean(body.email),
-    description: clean(body.description),
-    outfit: clean(body.outfit),
-    musicStyle: clean(body.musicStyle),
-    happyHour: clean(body.happyHour),
-    schedule: clean(body.schedule),
-    favorableDay: clean(body.favorableDay),
-    favorableHour: clean(body.favorableHour),
-    averagePrice: body.averagePrice ?? null,
-    capacityPerSlot: body.capacityPerSlot,
-    cuisineType: clean(body.cuisineType),
-    ambienceTags: [...new Set(body.ambienceTags.map(tag => tag.trim()).filter(Boolean))],
-    categories: {deleteMany: {}, create: categoryIds.map(categoryId => ({categoryId}))},
-  }, include: {categories: true}});
+  const place = await prisma.place.update({where: {id: placeId}, data: placeProfileUpdate(body), include: {categories: true}});
   return res.json({message: 'Fiche établissement mise à jour', place: placeDto(place)});
 }));
 
@@ -769,6 +817,7 @@ const eventSchema = z.object({
 app.get('/pro/places/:placeId/events', asyncRoute(async (req, res) => {
   const placeId = id(req.params.placeId);
   if (!(await ensurePlaceAccess(req, res, placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, placeId, 'EVENTS'))) return;
   const events = await prisma.placeEvent.findMany({where: {placeId}, orderBy: [{active: 'desc'}, {startDate: 'asc'}, {createdAt: 'desc'}]});
   return res.json(events.map(eventDto));
 }));
@@ -776,6 +825,7 @@ app.get('/pro/places/:placeId/events', asyncRoute(async (req, res) => {
 app.post('/pro/places/:placeId/events', asyncRoute(async (req, res) => {
   const placeId = id(req.params.placeId);
   if (!(await ensurePlaceAccess(req, res, placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, placeId, 'EVENTS'))) return;
   const body = eventSchema.parse(req.body);
   const event = await prisma.placeEvent.create({data: {
     placeId,
@@ -793,6 +843,7 @@ app.post('/pro/places/:placeId/events', asyncRoute(async (req, res) => {
 app.put('/pro/places/:placeId/events/:eventId', asyncRoute(async (req, res) => {
   const placeId = id(req.params.placeId);
   if (!(await ensurePlaceAccess(req, res, placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, placeId, 'EVENTS'))) return;
   const eventId = id(req.params.eventId);
   const existing = await prisma.placeEvent.findFirst({where: {id: eventId, placeId}});
   if (!existing) return res.status(404).json({message: 'Événement introuvable'});
@@ -812,6 +863,7 @@ app.put('/pro/places/:placeId/events/:eventId', asyncRoute(async (req, res) => {
 app.delete('/pro/places/:placeId/events/:eventId', asyncRoute(async (req, res) => {
   const placeId = id(req.params.placeId);
   if (!(await ensurePlaceAccess(req, res, placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, placeId, 'EVENTS'))) return;
   const deleted = await prisma.placeEvent.deleteMany({where: {id: id(req.params.eventId), placeId}});
   if (!deleted.count) return res.status(404).json({message: 'Événement introuvable'});
   return res.status(204).send();
@@ -829,6 +881,7 @@ app.post('/pro/places/:placeId/media/signature', asyncRoute(async (req, res) => 
   if (!(await ensurePlaceAccess(req, res, placeId))) return;
   if (!cloudinaryReady()) return res.status(503).json({message: 'Cloudinary n’est pas encore configuré sur le backend'});
   const type = z.enum(['COVER', 'GALLERY', 'VIDEO']).default('GALLERY').parse(req.body?.type);
+  if (type === 'VIDEO' && !(await ensureSubscriptionFeature(req, res, placeId, 'VIDEO'))) return;
   const imageCount = await prisma.placeMedia.count({where: {placeId, type: {in: [PlaceMediaType.COVER, PlaceMediaType.GALLERY]}}});
   const hasCover = type === 'COVER' && await prisma.placeMedia.count({where: {placeId, type: PlaceMediaType.COVER}}) > 0;
   if (type !== 'VIDEO' && imageCount >= 5 && !hasCover) return res.status(409).json({message: 'L’établissement est limité à 5 photos, couverture comprise'});
@@ -856,6 +909,7 @@ app.post('/pro/places/:placeId/media/complete', asyncRoute(async (req, res) => {
     duration: z.coerce.number().positive().max(60).optional(),
     keywords: z.array(z.string()).optional(),
   }).parse(req.body);
+  if (body.type === 'VIDEO' && !(await ensureSubscriptionFeature(req, res, placeId, 'VIDEO'))) return;
   const expected = cloudinary.utils.api_sign_request({public_id: body.publicId, version: body.version}, config.CLOUDINARY_API_SECRET!);
   if (expected !== body.signature) return res.status(400).json({message: 'Réponse Cloudinary invalide'});
   if (!body.publicId.startsWith(`barmej/places/${placeId}/`)) return res.status(403).json({message: 'Ce média n’appartient pas à cet établissement'});
@@ -894,6 +948,7 @@ app.post('/pro/places/:placeId/media/complete', asyncRoute(async (req, res) => {
 app.patch('/pro/places/:placeId/media/:mediaId/keywords', asyncRoute(async (req, res) => {
   const placeId = id(req.params.placeId);
   if (!(await ensurePlaceAccess(req, res, placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, placeId, 'VIDEO'))) return;
   const keywords = videoKeywordsSchema.parse(req.body?.keywords);
   const media = await prisma.placeMedia.findFirst({where: {id: id(req.params.mediaId), placeId, type: PlaceMediaType.VIDEO}});
   if (!media) return res.status(404).json({message: 'Vidéo introuvable'});
@@ -919,6 +974,7 @@ app.delete('/pro/places/:placeId/media/:mediaId', asyncRoute(async (req, res) =>
   if (!(await ensurePlaceAccess(req, res, placeId))) return;
   const media = await prisma.placeMedia.findFirst({where: {id: id(req.params.mediaId), placeId}});
   if (!media) return res.status(404).json({message: 'Photo introuvable'});
+  if (media.type === PlaceMediaType.VIDEO && !(await ensureSubscriptionFeature(req, res, placeId, 'VIDEO'))) return;
   if (cloudinaryReady()) await cloudinary.uploader.destroy(media.publicId, {invalidate: true, resource_type: media.type === PlaceMediaType.VIDEO ? 'video' : 'image'});
   await prisma.$transaction(async tx => {
     await tx.placeMedia.delete({where: {id: media.id}});
@@ -1013,6 +1069,7 @@ app.post('/loyalty/redemptions/:redemptionId/cancel', asyncRoute(async (req, res
 app.get('/pro/loyalty', asyncRoute(async (req, res) => {
   const placeId = id(req.query.placeId);
   if (!(await ensurePlaceAccess(req, res, placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, placeId, 'LOYALTY'))) return;
   const program = await prisma.loyaltyProgram.upsert({where: {placeId}, update: {}, create: {placeId}, include: {rewards: {orderBy: {pointsCost: 'asc'}}}});
   const [members, pointsIssued] = await Promise.all([
     prisma.loyaltyAccount.count({where: {placeId}}),
@@ -1024,6 +1081,7 @@ app.get('/pro/loyalty', asyncRoute(async (req, res) => {
 app.put('/pro/loyalty', asyncRoute(async (req, res) => {
   const body = z.object({placeId: z.coerce.number().int().positive(), enabled: z.boolean(), pointsPerVisit: z.coerce.number().int().min(1).max(1000)}).parse(req.body);
   if (!(await ensurePlaceAccess(req, res, body.placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, body.placeId, 'LOYALTY'))) return;
   const program = await prisma.loyaltyProgram.upsert({where: {placeId: body.placeId}, update: body, create: body});
   await audit(req, body.placeId, 'LOYALTY_PROGRAM_UPDATED', 'LOYALTY_PROGRAM', program.id, {enabled: body.enabled, pointsPerVisit: body.pointsPerVisit});
   return res.json(program);
@@ -1034,6 +1092,7 @@ const rewardInput = z.object({placeId: z.coerce.number().int().positive(), name:
 app.post('/pro/loyalty/rewards', asyncRoute(async (req, res) => {
   const body = rewardInput.parse(req.body);
   if (!(await ensurePlaceAccess(req, res, body.placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, body.placeId, 'LOYALTY'))) return;
   const program = await prisma.loyaltyProgram.upsert({where: {placeId: body.placeId}, update: {}, create: {placeId: body.placeId}});
   const reward = await prisma.loyaltyReward.create({data: {programId: program.id, placeId: body.placeId, name: body.name, description: body.description || null, pointsCost: body.pointsCost, active: body.active, stock: body.stock ?? null, expiresAt: body.expiresAt ? new Date(body.expiresAt) : null}});
   await audit(req, body.placeId, 'LOYALTY_REWARD_CREATED', 'LOYALTY_REWARD', reward.id, {name: reward.name, pointsCost: reward.pointsCost});
@@ -1044,6 +1103,7 @@ app.patch('/pro/loyalty/rewards/:rewardId', asyncRoute(async (req, res) => {
   const existing = await prisma.loyaltyReward.findUnique({where: {id: id(req.params.rewardId)}});
   if (!existing) return res.status(404).json({message: 'Récompense introuvable'});
   if (!(await ensurePlaceAccess(req, res, existing.placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, existing.placeId, 'LOYALTY'))) return;
   const body = rewardInput.omit({placeId: true}).partial().parse(req.body);
   const reward = await prisma.loyaltyReward.update({where: {id: existing.id}, data: {...body, description: body.description === undefined ? undefined : body.description || null, stock: body.stock === undefined ? undefined : body.stock, expiresAt: body.expiresAt === undefined ? undefined : body.expiresAt ? new Date(body.expiresAt) : null}});
   await audit(req, existing.placeId, 'LOYALTY_REWARD_UPDATED', 'LOYALTY_REWARD', reward.id, {name: reward.name, pointsCost: reward.pointsCost, active: reward.active});
@@ -1054,6 +1114,7 @@ app.delete('/pro/loyalty/rewards/:rewardId', asyncRoute(async (req, res) => {
   const reward = await prisma.loyaltyReward.findUnique({where: {id: id(req.params.rewardId)}});
   if (!reward) return res.status(404).json({message: 'Récompense introuvable'});
   if (!(await ensurePlaceAccess(req, res, reward.placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, reward.placeId, 'LOYALTY'))) return;
   await prisma.loyaltyReward.update({where: {id: reward.id}, data: {active: false}});
   await audit(req, reward.placeId, 'LOYALTY_REWARD_ARCHIVED', 'LOYALTY_REWARD', reward.id);
   return res.status(204).send();
@@ -1062,6 +1123,7 @@ app.delete('/pro/loyalty/rewards/:rewardId', asyncRoute(async (req, res) => {
 app.get('/pro/loyalty/members', asyncRoute(async (req, res) => {
   const placeId = id(req.query.placeId);
   if (!(await ensurePlaceAccess(req, res, placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, placeId, 'LOYALTY'))) return;
   const accounts = await prisma.loyaltyAccount.findMany({where: {placeId}, include: {user: {select: {firstName: true, lastName: true, email: true, mobile: true}}}, orderBy: [{balance: 'desc'}, {updatedAt: 'desc'}], take: 100});
   return res.json(accounts.map(account => ({id: account.id, customerName: `${account.user.firstName} ${account.user.lastName}`.trim(), email: account.user.email, mobile: account.user.mobile, balance: account.balance, lifetimePoints: account.lifetimePoints, updatedAt: account.updatedAt})));
 }));
@@ -1076,6 +1138,7 @@ app.post('/pro/loyalty/redemptions/scan', asyncRoute(async (req, res) => {
   const redemption = await prisma.loyaltyRedemption.findUnique({where: {token: value}, include: {reward: true, place: true, user: true}});
   if (!redemption) return res.status(404).json({message: 'QR code de récompense invalide'});
   if (!(await ensureScannerAccess(req, res, redemption.placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, redemption.placeId, 'LOYALTY'))) return;
   if (redemption.status !== LoyaltyRedemptionStatus.PENDING) return res.status(409).json({message: 'Ce bon a déjà été utilisé ou annulé'});
   if (redemption.expiresAt <= new Date()) return res.status(410).json({message: 'Ce QR code a expiré'});
   if (!redemption.reward.active) return res.status(409).json({message: 'Cette récompense a été désactivée'});
@@ -1116,6 +1179,7 @@ app.get('/pro/statistics', asyncRoute(async (req, res) => {
     days: z.coerce.number().int().min(7).max(365).default(30),
   }).parse(req.query);
   if (!(await ensurePlaceAccess(req, res, query.placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, query.placeId, 'ADVANCED_STATS'))) return;
   const start = dateOnly(new Date(Date.now() - (query.days - 1) * 86_400_000).toISOString().slice(0, 10));
   const rows = await prisma.reservation.findMany({
     where: {placeId: query.placeId, reservationDate: {gte: start}},
@@ -1232,6 +1296,7 @@ app.get('/pro/reservations', asyncRoute(async (req, res) => {
 app.get('/pro/audit-logs', asyncRoute(async (req, res) => {
   const query = z.object({placeId: z.coerce.number().int().positive(), limit: z.coerce.number().int().min(1).max(100).default(50)}).parse(req.query);
   if (!(await ensurePlaceAccess(req, res, query.placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, query.placeId, 'CUSTOMER_INSIGHTS'))) return;
   const logs = await prisma.auditLog.findMany({where: {placeId: query.placeId}, include: {actor: {select: {firstName: true, lastName: true, role: true}}}, orderBy: {createdAt: 'desc'}, take: query.limit});
   return res.json(logs.map(log => ({id: log.id, action: log.action, entityType: log.entityType, entityId: log.entityId, details: log.details, createdAt: log.createdAt, actorName: `${log.actor.firstName} ${log.actor.lastName}`.trim(), actorRole: log.actor.role})));
 }));
@@ -1248,6 +1313,7 @@ app.post('/pro/tickets/scan', asyncRoute(async (req, res) => {
   const existing = await prisma.reservation.findFirst({where: {id: ticket.reservationId, userId: ticket.userId}, include: {place: true, user: true}});
   if (!existing) return res.status(404).json({message: 'Réservation introuvable'});
   if (!(await ensureScannerAccess(req, res, existing.placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, existing.placeId, 'QR_SCANNER'))) return;
   if (existing.status === ReservationStatus.COMPLETED) return res.json({...reservationDto(existing), customerName: `${existing.user.firstName} ${existing.user.lastName}`.trim(), alreadyScanned: true});
   if (existing.status === ReservationStatus.NO_SHOW) return res.status(409).json({message: 'Cette réservation est déjà marquée comme absence'});
   if (existing.status !== ReservationStatus.CONFIRMED) return res.status(409).json({message: 'Seule une réservation confirmée peut être validée'});
@@ -1340,6 +1406,7 @@ app.post('/reviews', asyncRoute(async (req, res) => {
 app.get('/pro/reviews', asyncRoute(async (req, res) => {
   const placeId = id(req.query.placeId);
   if (!(await ensurePlaceAccess(req, res, placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, placeId, 'REVIEWS'))) return;
   const rows = await prisma.review.findMany({where: {placeId}, include: {user: true}, orderBy: {createdAt: 'desc'}});
   return res.json(rows.map(row => ({...row, customerName: `${row.user.firstName} ${row.user.lastName}`.trim(), averageRating: Math.round(((row.cuisineRating + row.serviceRating + row.ambianceRating + row.priceRating) / 4) * 10) / 10})));
 }));
@@ -1347,6 +1414,7 @@ app.get('/pro/reviews', asyncRoute(async (req, res) => {
 app.get('/pro/reviews/settings', asyncRoute(async (req, res) => {
   const placeId = id(req.query.placeId);
   if (!(await ensurePlaceAccess(req, res, placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, placeId, 'REVIEWS'))) return;
   const place = await prisma.place.findUnique({where: {id: placeId}, select: {reviewsEnabled: true}});
   if (!place) return res.status(404).json({message: 'Établissement introuvable'});
   return res.json(place);
@@ -1355,6 +1423,7 @@ app.get('/pro/reviews/settings', asyncRoute(async (req, res) => {
 app.put('/pro/reviews/settings', asyncRoute(async (req, res) => {
   const body = z.object({placeId: z.coerce.number().int().positive(), enabled: z.boolean()}).parse(req.body);
   if (!(await ensurePlaceAccess(req, res, body.placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, body.placeId, 'REVIEWS'))) return;
   const place = await prisma.place.update({where: {id: body.placeId}, data: {reviewsEnabled: body.enabled}, select: {reviewsEnabled: true}});
   await audit(req, body.placeId, body.enabled ? 'REVIEWS_ENABLED' : 'REVIEWS_DISABLED', 'PLACE', body.placeId);
   return res.json(place);
@@ -1365,6 +1434,7 @@ app.patch('/pro/reviews/:reviewId/respond', asyncRoute(async (req, res) => {
   const existing = await prisma.review.findUnique({where: {id: reviewId}});
   if (!existing) return res.status(404).json({message: 'Avis introuvable'});
   if (!(await ensurePlaceAccess(req, res, existing.placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, existing.placeId, 'REVIEWS'))) return;
   const {response} = z.object({response: z.string().trim().min(2).max(2000)}).parse(req.body);
   const review = await prisma.review.update({where: {id: reviewId}, data: {establishmentResponse: response, respondedAt: new Date()}});
   await notify(review.userId, 'Réponse à votre avis', 'L’établissement a répondu à votre avis.');
@@ -1406,9 +1476,59 @@ app.patch('/waitlist/:entryId/cancel', asyncRoute(async (req, res) => {
   return res.status(204).send();
 }));
 
+// ───────── Barmej Pro · séjours en maison d'hôtes ─────────
+const stayDto = (row: any) => ({
+  id: row.id, placeId: row.placeId, placeName: row.place?.name,
+  checkIn: row.checkIn.toISOString().slice(0, 10), checkOut: row.checkOut.toISOString().slice(0, 10),
+  nights: row.nights, guests: row.guests, rooms: row.rooms, estimate: row.estimate, message: row.message,
+  status: row.status, createdAt: row.createdAt,
+  customerName: row.user ? `${row.user.firstName} ${row.user.lastName}`.trim() : undefined,
+  customerMobile: row.user?.mobile, customerEmail: row.user?.email,
+});
+
+app.get('/pro/stays', asyncRoute(async (req, res) => {
+  const query = z.object({placeId: z.coerce.number().int().positive(), status: z.nativeEnum(ReservationStatus).optional()}).parse(req.query);
+  if (!(await ensurePlaceAccess(req, res, query.placeId))) return;
+  const rows = await prisma.stayBooking.findMany({where: {placeId: query.placeId, ...(query.status ? {status: query.status} : {})}, include: {place: true, user: true}, orderBy: [{checkIn: 'asc'}, {createdAt: 'asc'}]});
+  return res.json(rows.map(stayDto));
+}));
+
+app.patch('/pro/stays/:stayId/status', asyncRoute(async (req, res) => {
+  const body = z.object({status: z.enum(['CONFIRMED', 'DECLINED', 'COMPLETED', 'NO_SHOW']), message: z.string().trim().max(500).optional()}).parse(req.body);
+  const nextStatus = body.status as ReservationStatus;
+  const existing = await prisma.stayBooking.findUnique({where: {id: id(req.params.stayId)}, include: {place: true}});
+  if (!existing) return res.status(404).json({message: 'Séjour introuvable'});
+  if (!(await ensurePlaceAccess(req, res, existing.placeId))) return;
+  if (!canMoveStay(existing.status, nextStatus)) return res.status(409).json({message: 'Transition de statut non autorisée'});
+  const row = await prisma.$transaction(async tx => {
+    if (nextStatus === ReservationStatus.CONFIRMED && existing.place.roomCount != null) {
+      // Confirmer ne doit jamais dépasser le nombre de chambres déclaré.
+      const others = await tx.stayBooking.findMany({where: {placeId: existing.placeId, id: {not: existing.id}, status: ReservationStatus.CONFIRMED, checkIn: {lt: existing.checkOut}, checkOut: {gt: existing.checkIn}}, select: {checkIn: true, checkOut: true, rooms: true}});
+      const left = roomsLeft(existing.place.roomCount, others, existing);
+      if (left != null && left < existing.rooms) throw Object.assign(new Error('Plus assez de chambres confirmées libres pour ces dates.'), {statusCode: 409});
+    }
+    return tx.stayBooking.update({where: {id: existing.id}, data: {status: nextStatus}, include: {place: true, user: true}});
+  }, {isolationLevel: 'Serializable'});
+  await audit(req, row.placeId, 'STAY_STATUS_CHANGED', 'STAY_BOOKING', row.id, {previousStatus: existing.status, nextStatus});
+  const labels: Record<string, string> = {CONFIRMED: 'confirmé', DECLINED: 'refusé', COMPLETED: 'terminé', NO_SHOW: 'marqué comme absence'};
+  const range = `du ${row.checkIn.toISOString().slice(0, 10)} au ${row.checkOut.toISOString().slice(0, 10)}`;
+  await notify(row.userId, 'Mise à jour de votre séjour', `Votre séjour chez ${row.place.name} ${range} a été ${labels[nextStatus]}.${body.message ? ` Message de l’hôte : ${body.message}` : ''}`);
+  return res.json(stayDto(row));
+}));
+
+app.patch('/pro/places/:placeId/stay-settings', asyncRoute(async (req, res) => {
+  const placeId = id(req.params.placeId);
+  if (!(await ensurePlaceAccess(req, res, placeId))) return;
+  const body = z.object({nightlyPrice: z.number().int().min(0).max(100_000).nullable().optional(), roomCount: z.number().int().min(1).max(500).nullable().optional()}).parse(req.body);
+  const row = await prisma.place.update({where: {id: placeId}, data: body});
+  await audit(req, placeId, 'STAY_SETTINGS_UPDATED', 'PLACE', placeId, body as Prisma.InputJsonValue);
+  return res.json({placeId, nightlyPrice: row.nightlyPrice, roomCount: row.roomCount});
+}));
+
 app.get('/pro/waitlist', asyncRoute(async (req, res) => {
   const placeId = id(req.query.placeId);
   if (!(await ensurePlaceAccess(req, res, placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, placeId, 'WAITLIST'))) return;
   await prisma.waitlistEntry.updateMany({where: {placeId, status: WaitlistStatus.OFFERED, offerExpiresAt: {lt: new Date()}}, data: {status: WaitlistStatus.EXPIRED}});
   const rows = await prisma.waitlistEntry.findMany({where: {placeId}, include: {user: true}, orderBy: [{reservationDate: 'asc'}, {reservationTime: 'asc'}, {createdAt: 'asc'}]});
   return res.json(rows.map(row => ({...row, reservationDate: row.reservationDate.toISOString().slice(0, 10), customerName: `${row.user.firstName} ${row.user.lastName}`.trim(), customerMobile: row.user.mobile, customerEmail: row.user.email})));
@@ -1419,6 +1539,7 @@ app.patch('/pro/waitlist/:entryId/offer', asyncRoute(async (req, res) => {
   const existing = await prisma.waitlistEntry.findUnique({where: {id: entryId}, include: {place: true}});
   if (!existing) return res.status(404).json({message: 'Demande introuvable'});
   if (!(await ensurePlaceAccess(req, res, existing.placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, existing.placeId, 'WAITLIST'))) return;
   if (existing.status !== WaitlistStatus.WAITING) return res.status(409).json({message: 'Cette demande n’est plus en attente'});
   const minutes = z.coerce.number().int().min(5).max(60).default(15).parse(req.body.minutes);
   const expires = new Date(Date.now() + minutes * 60_000);

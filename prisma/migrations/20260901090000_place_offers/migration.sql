@@ -1,0 +1,4 @@
+-- Intentionally empty.
+-- The place-offers experiment was removed before deployment, but the timestamped
+-- migration directory remains in the ordered Prisma history. Keeping a valid
+-- no-op migration prevents later production migrations from being blocked.

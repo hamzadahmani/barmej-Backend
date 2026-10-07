@@ -2,6 +2,19 @@
 
 API séparée Node.js + TypeScript + Express + PostgreSQL, compatible avec les endpoints actuellement utilisés par l'application React Native Barmej.
 
+## Barmejli / Win Nemchiw
+
+L’API authentifiée `/v1/barmejli` construit des programmes météo-compatibles à partir des vrais `places` et `experiences` du catalogue :
+
+- `POST /generate` avec `{ "prompt": "Sortie romantique à La Marsa samedi soir, budget 120 DT" }` ;
+- `PATCH /:planId/save` ;
+- `POST /:planId/regenerate` ;
+- `POST /:planId/steps/:position/replace` ;
+- `POST /:planId/adapt-weather` ;
+- `GET /` et `GET /:planId`.
+
+Déployer la migration `20260901120000_barmejli_mvp` avant d’activer l’écran, puis renseigner environnement, sensibilité météo, moods, groupes, prix et durée des lieux/expériences. Les prévisions Open-Meteo sont mises en cache 15 minutes. PostGIS sélectionne les candidats dans un rayon de 25 km, avec un repli compatible pour les bases locales sans extension.
+
 ## Fonctionnalités
 
 - inscription, connexion par email et connexion externe Google ;

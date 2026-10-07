@@ -18,6 +18,9 @@ export const userDto = (u: User) => ({
   dietaryPreferences: u.dietaryPreferences,
   allergies: u.allergies,
   favoriteAmbiences: u.favoriteAmbiences,
+  interests: u.interests,
+  onboardingCompletedAt: u.onboardingCompletedAt,
+  onboardingRequired: !u.onboardingCompletedAt,
   preferredBudget: u.preferredBudget,
 });
 

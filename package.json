@@ -14,6 +14,7 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
+    "db:seed:free-local": "node scripts/seed-free-activities.cjs",
     "db:studio": "prisma studio"
   },
   "dependencies": {
@@ -28,6 +29,7 @@
     "morgan": "^1.10.0",
     "prisma": "^5.22.0",
     "redis": "^5.8.2",
+    "tesseract.js": "^7.0.0",
     "tsx": "^4.19.2",
     "zod": "^3.23.8"
   },

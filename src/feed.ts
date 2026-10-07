@@ -122,7 +122,7 @@ async function createFeedResponse(input: FeedInput, cursor: FeedCursor | null, o
   const weekday = now.getUTCDay();
   const currentTime = `${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`;
   const [user, favorites, states, videos, engagement, reports, postgisDistances, rememberedSeen, campaigns, campaignDailyCounts] = await Promise.all([
-    prisma.user.findUniqueOrThrow({where: {id: input.userId}, select: {favoriteAmbiences: true, preferredBudget: true}}),
+    prisma.user.findUniqueOrThrow({where: {id: input.userId}, select: {favoriteAmbiences: true, preferredBudget: true, interests: true}}),
     prisma.favorite.findMany({where: {userId: input.userId}, select: {placeId: true, place: {select: {categoryId: true}}}}),
     prisma.userVideoState.findMany({where: {userId: input.userId}, select: {videoId: true, lastSeenAt: true, hidden: true}}),
     prisma.placeMedia.findMany({
@@ -166,9 +166,19 @@ async function createFeedResponse(input: FeedInput, cursor: FeedCursor | null, o
     if (input.mode === 'nearby' && !open) return [];
     const categoryIds = [video.place.categoryId, ...video.place.categories.map(item => item.categoryId)];
     const categoryMatch = categoryIds.some(categoryId => favoriteCategories.has(categoryId));
+    const discoveryText = normalized([
+      video.place.subtitle,
+      video.place.cuisineType,
+      ...video.place.ambienceTags,
+      ...video.keywords,
+    ].filter(Boolean).join(' ')).replace(/_/g, ' ');
+    const interestMatch = user.interests.some(value => {
+      const term = normalized(value).replace(/_/g, ' ');
+      return discoveryText.includes(term) || (term === 'cafe' && discoveryText.includes('coffee')) || (term === 'leisure' && discoveryText.includes('loisir'));
+    });
     const ambienceMatch = video.place.ambienceTags.some(tag => user.favoriteAmbiences.includes(tag));
     const budgetMatch = user.preferredBudget && video.place.averagePrice ? video.place.averagePrice <= user.preferredBudget : false;
-    const interest = clamp((categoryMatch ? 0.5 : 0) + (ambienceMatch ? 0.3 : 0) + (budgetMatch ? 0.2 : 0));
+    const interest = clamp((interestMatch ? 0.45 : 0) + (categoryMatch ? 0.3 : 0) + (ambienceMatch ? 0.15 : 0) + (budgetMatch ? 0.1 : 0));
     const distance = input.latitude !== undefined && input.longitude !== undefined
       ? postgisDistances?.get(video.placeId) ?? distanceKm(input.latitude, input.longitude, video.place.latitude, video.place.longitude)
       : null;
@@ -189,7 +199,7 @@ async function createFeedResponse(input: FeedInput, cursor: FeedCursor | null, o
       }
     }
     const score = scoreCandidate({interest, proximity, engagement: engagementScore, freshness, quality, popularity, availability, novelty, seenPenalty}, coldStart);
-    const reason = favoritePlaces.has(video.placeId) ? 'Une adresse que vous aimez' : distance !== null && distance <= 5 ? 'Près de vous' : categoryMatch ? 'Selon vos préférences' : freshness > 0.7 ? 'Nouveau sur Barmej' : 'Populaire sur Barmej';
+    const reason = favoritePlaces.has(video.placeId) ? 'Une adresse que vous aimez' : interestMatch ? 'Selon vos centres d’intérêt' : distance !== null && distance <= 5 ? 'Près de vous' : categoryMatch ? 'Selon vos préférences' : freshness > 0.7 ? 'Nouveau sur Barmej' : 'Populaire sur Barmej';
     return [{video, score, distance, reason, sponsored: false, campaignId: null as number | null}];
   }).sort((a, b) => b.score - a.score || b.video.id - a.video.id);
 

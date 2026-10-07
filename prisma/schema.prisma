@@ -69,6 +69,19 @@ enum FeedEventType {
   REPORT
 }
 
+enum VenueEnvironment {
+  INDOOR
+  OUTDOOR
+  COVERED_OUTDOOR
+  MIXED
+}
+
+enum BarmejliPlanStatus {
+  DRAFT
+  SAVED
+  ARCHIVED
+}
+
 model User {
   id                  Int                  @id @default(autoincrement()) @map("id_user")
   email               String               @unique @map("email")
@@ -87,6 +100,8 @@ model User {
   dietaryPreferences  String[]             @default([]) @map("dietary_preferences")
   allergies           String[]             @default([])
   favoriteAmbiences   String[]             @default([]) @map("favorite_ambiences")
+  interests           String[]             @default([])
+  onboardingCompletedAt DateTime?          @map("onboarding_completed_at")
   preferredBudget     Int?                 @map("preferred_budget")
   createdAt           DateTime             @default(now()) @map("created_at")
   updatedAt           DateTime             @updatedAt @map("updated_at")
@@ -105,8 +120,25 @@ model User {
   loyaltyRedemptions  LoyaltyRedemption[]
   feedEvents          FeedEvent[]
   videoStates         UserVideoState[]
+  barmejliPlans       BarmejliPlan[]
+  refreshTokens       RefreshToken[]
+  stayBookings        StayBooking[]
 
   @@map("users")
+}
+
+model RefreshToken {
+  id                  Int       @id @default(autoincrement())
+  tokenHash           String    @unique @map("token_hash")
+  userId              Int       @map("user_id")
+  expiresAt           DateTime  @map("expires_at")
+  revokedAt           DateTime? @map("revoked_at")
+  replacedByTokenHash String?   @map("replaced_by_token_hash")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("refresh_tokens")
 }
 
 model Category {
@@ -139,11 +171,19 @@ model Place {
   favorableDay        String?              @map("favorable_day")
   favorableHour       String?              @map("favorable_hour")
   averagePrice        Int?                 @map("average_price")
+  /// Maisons d'hôtes : prix d'une nuit (à partir de) et nombre de chambres déclarées.
+  nightlyPrice        Int?                 @map("nightly_price")
+  roomCount           Int?                 @map("room_count")
   capacityPerSlot     Int                  @default(20) @map("capacity_per_slot")
   verified            Boolean              @default(false)
   reviewsEnabled      Boolean              @default(true) @map("reviews_enabled")
   cuisineType         String?              @map("cuisine_type")
   ambienceTags        String[]             @default([]) @map("ambience_tags")
+  suitabilityMoods    String[]             @default([]) @map("suitability_moods")
+  groupTypes          String[]             @default([]) @map("group_types")
+  environment         VenueEnvironment     @default(INDOOR)
+  weatherSensitive    Boolean              @default(false) @map("weather_sensitive")
+  defaultDurationMin  Int                  @default(60) @map("default_duration_min")
   createdAt           DateTime             @default(now()) @map("created_at")
   updatedAt           DateTime             @updatedAt @map("updated_at")
   category            Category             @relation(fields: [categoryId], references: [id], onDelete: Restrict)
@@ -169,9 +209,143 @@ model Place {
   feedEvents          FeedEvent[]
   videoStates         UserVideoState[]
   sponsoredCampaigns  SponsoredCampaign[]
+  subscription        EstablishmentSubscription?
+  experiences         Experience[]
+  itinerarySteps      BarmejliStep[]
+  menus               PlaceMenu[]
+  stayBookings        StayBooking[]
 
   @@index([categoryId])
   @@map("places")
+}
+
+model Experience {
+  id                 Int              @id @default(autoincrement()) @map("id_experience")
+  placeId            Int              @map("place_id")
+  name               String
+  description        String?
+  category           String
+  price              Int              @default(0)
+  durationMin        Int              @default(60) @map("duration_min")
+  suitabilityMoods   String[]         @default([]) @map("suitability_moods")
+  groupTypes         String[]         @default([]) @map("group_types")
+  keywords           String[]         @default([])
+  environment        VenueEnvironment @default(INDOOR)
+  weatherSensitive   Boolean          @default(false) @map("weather_sensitive")
+  minTemperatureC    Float?           @map("min_temperature_c")
+  maxTemperatureC    Float?           @map("max_temperature_c")
+  maxWindKph          Float?           @map("max_wind_kph")
+  active              Boolean          @default(true)
+  createdAt           DateTime         @default(now()) @map("created_at")
+  updatedAt           DateTime         @updatedAt @map("updated_at")
+  place               Place            @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  itinerarySteps     BarmejliStep[]
+
+  @@index([placeId, active])
+  @@index([category, active])
+  @@map("experiences")
+}
+
+model BarmejliPlan {
+  id                Int                 @id @default(autoincrement()) @map("id_plan")
+  userId            Int                 @map("user_id")
+  status            BarmejliPlanStatus  @default(DRAFT)
+  originalPrompt    String              @map("original_prompt")
+  city              String
+  scheduledAt       DateTime            @map("scheduled_at")
+  budget            Int
+  mood              String
+  groupType         String              @map("group_type")
+  latitude          Float
+  longitude         Float
+  weatherSnapshot   Json                @map("weather_snapshot")
+  weatherCheckedAt  DateTime            @map("weather_checked_at")
+  totalCost         Int                 @map("total_cost")
+  totalDurationMin  Int                 @map("total_duration_min")
+  totalDistanceKm   Float               @map("total_distance_km")
+  createdAt         DateTime            @default(now()) @map("created_at")
+  updatedAt         DateTime            @updatedAt @map("updated_at")
+  user              User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  steps             BarmejliStep[]
+
+  @@index([userId, status, scheduledAt])
+  @@map("barmejli_plans")
+}
+
+model BarmejliStep {
+  id                Int          @id @default(autoincrement()) @map("id_step")
+  planId            Int          @map("plan_id")
+  placeId           Int          @map("place_id")
+  experienceId      Int?         @map("experience_id")
+  position          Int
+  startsAt          DateTime     @map("starts_at")
+  endsAt            DateTime     @map("ends_at")
+  estimatedCost     Int          @map("estimated_cost")
+  menuSelection     Json?        @map("menu_selection")
+  travelMinutes     Int          @default(0) @map("travel_minutes")
+  travelDistanceKm  Float        @default(0) @map("travel_distance_km")
+  travelMode        String       @default("walk") @map("travel_mode")
+  weatherFallback   Boolean      @default(false) @map("weather_fallback")
+  placeNameSnapshot String       @map("place_name_snapshot")
+  titleSnapshot     String       @map("title_snapshot")
+  plan              BarmejliPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  place             Place        @relation(fields: [placeId], references: [id], onDelete: Restrict)
+  experience        Experience?  @relation(fields: [experienceId], references: [id], onDelete: SetNull)
+
+  @@unique([planId, position])
+  @@index([placeId])
+  @@map("barmejli_steps")
+}
+
+model PlaceMenu {
+  id           Int      @id @default(autoincrement())
+  placeId      Int      @map("place_id")
+  publicId     String   @unique @map("public_id")
+  imageUrl     String   @map("image_url")
+  draftItems   Json     @default("[]") @map("draft_items")
+  items        Json     @default("[]")
+  ocrText      String?  @map("ocr_text")
+  validatedAt  DateTime? @map("validated_at")
+  active       Boolean  @default(false)
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+  place        Place    @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@index([placeId, active, validatedAt])
+  @@map("place_menus")
+}
+
+enum SubscriptionPlan {
+  DISCOVERY
+  ESSENTIAL
+  PRO
+  PREMIUM
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  SUSPENDED
+  EXPIRED
+}
+
+model EstablishmentSubscription {
+  id            Int                @id @default(autoincrement()) @map("id_subscription")
+  placeId       Int                @unique @map("place_id")
+  plan          SubscriptionPlan   @default(DISCOVERY)
+  status        SubscriptionStatus @default(ACTIVE)
+  requestedPlan SubscriptionPlan?  @map("requested_plan")
+  requestedAt   DateTime?          @map("requested_at")
+  startsAt      DateTime?          @map("starts_at")
+  endsAt        DateTime?          @map("ends_at")
+  activatedAt   DateTime?          @map("activated_at")
+  activatedById Int?               @map("activated_by_id")
+  createdAt     DateTime           @default(now()) @map("created_at")
+  updatedAt     DateTime           @updatedAt @map("updated_at")
+  place         Place              @relation(fields: [placeId], references: [id], onDelete: Cascade)
+
+  @@index([plan, status])
+  @@index([requestedPlan, requestedAt])
+  @@map("establishment_subscriptions")
 }
 
 enum PlaceMediaType {
@@ -639,4 +813,27 @@ model GroupVote {
 
   @@unique([optionId, userId])
   @@map("group_votes")
+}
+
+/// Séjour en maison d'hôtes, réservé à la nuit (arrivée → départ). L'hôte confirme.
+model StayBooking {
+  id        Int               @id @default(autoincrement()) @map("id_stay_booking")
+  userId    Int               @map("user_id")
+  placeId   Int               @map("place_id")
+  checkIn   DateTime          @map("check_in") @db.Date
+  checkOut  DateTime          @map("check_out") @db.Date
+  nights    Int
+  guests    Int
+  rooms     Int               @default(1)
+  estimate  Int?
+  message   String?
+  status    ReservationStatus @default(PENDING)
+  createdAt DateTime          @default(now()) @map("created_at")
+  updatedAt DateTime          @updatedAt @map("updated_at")
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  place     Place             @relation(fields: [placeId], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+  @@index([placeId, checkIn, checkOut, status])
+  @@map("stay_bookings")
 }
