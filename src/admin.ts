@@ -8,6 +8,8 @@ import {prisma} from './db';
 import {containsProfanity} from './profanity';
 import {SOURCE_LABELS, conversionRate, mergeDaily, percentChange, periodDays, videoThumbnail} from './audienceLogic';
 import {subscriptionFeatures} from './subscriptions';
+import {catalogWithPrices, planPrices, resolveSubscription} from './subscriptionSync';
+import {addDays, dayString, lengthInDays, monthsCovered, overlaps, parseDay, periodState, placeSubscriptionState, suggestedAmount, summarizeSubscriptions, tunisToday} from './subscriptionLogic';
 
 export const adminRouter = Router();
 const route = (handler: (req: Request, res: Response) => Promise<unknown>) =>
@@ -191,39 +193,172 @@ adminRouter.delete('/places/:id/managers/:userId', route(async (req, res) => {
 }));
 
 /* ─────────── Abonnements ─────────── */
-const subscriptionRow = (s: any) => ({
-  placeId: s.placeId, placeName: s.place?.name, plan: s.plan, status: s.status, requestedPlan: s.requestedPlan,
-  requestedAt: s.requestedAt, startsAt: s.startsAt, endsAt: s.endsAt, activatedAt: s.activatedAt, features: subscriptionFeatures(s.plan),
+const PAID_PLANS = [SubscriptionPlan.ESSENTIAL, SubscriptionPlan.PRO, SubscriptionPlan.PREMIUM] as const;
+const dayInput = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Date au format AAAA-MM-JJ');
+const periodDto = (p: any, today = tunisToday()) => ({
+  id: p.id, placeId: p.placeId, plan: p.plan, startsAt: dayString(p.startsAt), endsAt: dayString(p.endsAt), amount: p.amount,
+  months: monthsCovered(p.startsAt, p.endsAt), note: p.note, state: periodState(p, today), cancelledAt: p.cancelledAt, createdAt: p.createdAt,
 });
+const notifyManagers = (placeId: number, title: string, message: string) =>
+  prisma.placeManager.findMany({where: {placeId}, select: {userId: true}})
+    .then(managers => Promise.all(managers.map(m => prisma.notification.create({data: {userId: m.userId, title, message}}))))
+    .catch(() => undefined);
 
-adminRouter.get('/subscriptions', route(async (req, res) => {
-  const q = pageQuery.extend({requested: z.enum(['true', 'false']).optional(), plan: z.nativeEnum(SubscriptionPlan).optional()}).parse(req.query);
-  const where: Prisma.EstablishmentSubscriptionWhereInput = {
-    ...(q.requested === 'true' ? {requestedPlan: {not: null}} : {}),
-    ...(q.plan ? {plan: q.plan} : {}),
-  };
-  const [rows, total] = await Promise.all([
-    prisma.establishmentSubscription.findMany({where, include: {place: true}, orderBy: [{requestedAt: {sort: 'desc', nulls: 'last'}}, {updatedAt: 'desc'}], skip: (q.page - 1) * q.pageSize, take: q.pageSize}),
-    prisma.establishmentSubscription.count({where}),
+// Formules et prix.
+adminRouter.get('/subscription-plans', route(async (_req, res) => {
+  const [catalog, counts] = await Promise.all([
+    catalogWithPrices(),
+    prisma.establishmentSubscription.groupBy({by: ['plan'], where: {status: SubscriptionStatus.ACTIVE}, _count: {_all: true}}),
   ]);
-  return res.json(paged(rows.map(subscriptionRow), total, q.page, q.pageSize));
+  const placeCount = await prisma.place.count();
+  const paid = counts.filter(c => c.plan !== SubscriptionPlan.DISCOVERY).reduce((sum, c) => sum + c._count._all, 0);
+  return res.json(catalog.map(item => ({
+    plan: item.plan, label: item.label, tagline: item.tagline, features: item.features,
+    monthlyPrice: item.monthlyPriceTnd, yearlyPrice: item.yearlyPriceTnd,
+    places: item.plan === SubscriptionPlan.DISCOVERY ? Math.max(0, placeCount - paid) : counts.find(c => c.plan === item.plan)?._count._all ?? 0,
+  })));
 }));
 
-adminRouter.put('/subscriptions/:placeId', route(async (req, res) => {
+adminRouter.put('/subscription-plans/:plan', route(async (req, res) => {
+  const plan = z.nativeEnum(SubscriptionPlan).parse(req.params.plan);
+  const body = z.object({
+    monthlyPrice: z.coerce.number().int().min(0).max(100_000),
+    yearlyPrice: z.coerce.number().int().min(0).max(1_000_000).nullable().optional(),
+  }).parse(req.body);
+  const row = await prisma.subscriptionPlanPrice.upsert({
+    where: {plan},
+    update: {monthlyPrice: body.monthlyPrice, yearlyPrice: body.yearlyPrice ?? null},
+    create: {plan, monthlyPrice: body.monthlyPrice, yearlyPrice: body.yearlyPrice ?? null},
+  });
+  return res.json(row);
+}));
+
+// Liste des établissements avec leur abonnement en cours (tous les établissements, payants ou non).
+adminRouter.get('/subscriptions', route(async (req, res) => {
+  const q = pageQuery.extend({
+    q: z.string().trim().optional(),
+    plan: z.nativeEnum(SubscriptionPlan).optional(),
+    state: z.enum(['active', 'expiring', 'scheduled', 'expired', 'none', 'paying']).optional(),
+    requested: z.enum(['true', 'false']).optional(),
+  }).parse(req.query);
+  const today = tunisToday();
+  const places = await prisma.place.findMany({
+    where: q.q ? {name: {contains: q.q, mode: 'insensitive'}} : undefined,
+    select: {id: true, name: true, image: true, subscription: true, subscriptionPeriods: {where: {cancelledAt: null}, orderBy: {startsAt: 'asc'}}},
+    orderBy: {name: 'asc'},
+  });
+  let rows = places.map(place => {
+    const state = placeSubscriptionState(place.subscriptionPeriods, today);
+    const sub = place.subscription;
+    // Formule affichée : celle de la période en cours, sinon celle enregistrée (anciens abonnements manuels).
+    const plan = state.current?.plan ?? (sub?.endsAt && sub.endsAt < today ? SubscriptionPlan.DISCOVERY : sub?.plan ?? SubscriptionPlan.DISCOVERY);
+    return {
+      placeId: place.id, placeName: place.name, image: place.image, plan, status: sub?.status ?? SubscriptionStatus.ACTIVE,
+      state: state.state === 'none' && plan !== SubscriptionPlan.DISCOVERY ? 'active' : state.state,
+      current: state.current ? periodDto(state.current, today) : null,
+      next: state.next ? periodDto(state.next, today) : null,
+      lastEndedAt: state.last ? dayString(state.last.endsAt) : null,
+      daysLeft: state.daysLeft, totalPaid: state.totalPaid,
+      requestedPlan: sub?.requestedPlan ?? null, requestedAt: sub?.requestedAt ?? null,
+    };
+  });
+  if (q.plan) rows = rows.filter(r => r.plan === q.plan);
+  if (q.requested === 'true') rows = rows.filter(r => r.requestedPlan).sort((a, b) => String(b.requestedAt).localeCompare(String(a.requestedAt)));
+  if (q.state === 'paying') rows = rows.filter(r => r.plan !== SubscriptionPlan.DISCOVERY);
+  else if (q.state) rows = rows.filter(r => r.state === q.state);
+  if (q.state === 'expiring' || q.state === 'active') rows.sort((a, b) => (a.daysLeft ?? 9999) - (b.daysLeft ?? 9999));
+  const total = rows.length;
+  return res.json(paged(rows.slice((q.page - 1) * q.pageSize, q.page * q.pageSize), total, q.page, q.pageSize));
+}));
+
+// Statistiques détaillées des abonnements.
+adminRouter.get('/subscriptions/stats', route(async (_req, res) => {
+  const today = tunisToday();
+  const [periods, placeCount, requests, places] = await Promise.all([
+    prisma.subscriptionPeriod.findMany({where: {cancelledAt: null}, select: {id: true, placeId: true, plan: true, startsAt: true, endsAt: true, amount: true, createdAt: true}}),
+    prisma.place.count(),
+    prisma.establishmentSubscription.count({where: {requestedPlan: {not: null}}}),
+    prisma.place.findMany({select: {id: true, name: true}}),
+  ]);
+  const stats = summarizeSubscriptions({periods, placeCount, today});
+  const name = (id: number) => places.find(p => p.id === id)?.name ?? `#${id}`;
+  return res.json({
+    ...stats,
+    pendingRequests: requests,
+    expiringSoon: stats.expiringSoon.map(row => ({...row, placeName: name(row.placeId)})),
+    recentlyExpired: stats.recentlyExpired.map(row => ({...row, placeName: name(row.placeId)})),
+  });
+}));
+
+// Historique des périodes d'un établissement.
+adminRouter.get('/subscriptions/:placeId/periods', route(async (req, res) => {
+  const placeId = positiveId(req.params.placeId);
+  const [place, periods, prices] = await Promise.all([
+    prisma.place.findUnique({where: {id: placeId}, select: {id: true, name: true}}),
+    prisma.subscriptionPeriod.findMany({where: {placeId}, orderBy: {startsAt: 'desc'}}),
+    planPrices(),
+  ]);
+  if (!place) return res.status(404).json({message: 'Établissement introuvable'});
+  const today = tunisToday();
+  return res.json({
+    place, periods: periods.map(p => periodDto(p, today)),
+    prices: Object.fromEntries([...prices.entries()]),
+    // Proposition de dates : à la suite de la dernière période, sinon aujourd'hui.
+    suggestedStart: dayString(periods.filter(p => !p.cancelledAt && p.endsAt >= today).reduce((latest, p) => (p.endsAt > latest ? addDays(p.endsAt, 1) : latest), today)),
+  });
+}));
+
+// Ajout d'une période d'abonnement (dates incluses, montant en dinars).
+adminRouter.post('/subscriptions/:placeId/periods', route(async (req, res) => {
   const placeId = positiveId(req.params.placeId);
   const body = z.object({
-    plan: z.nativeEnum(SubscriptionPlan),
-    status: z.nativeEnum(SubscriptionStatus).default(SubscriptionStatus.ACTIVE),
-    endsAt: z.coerce.date().nullable().optional(),
+    plan: z.enum(PAID_PLANS),
+    startsAt: dayInput,
+    endsAt: dayInput,
+    amount: z.coerce.number().int().min(0).max(1_000_000).optional(),
+    note: z.string().trim().max(300).optional(),
   }).parse(req.body);
-  const now = new Date();
-  const data = {plan: body.plan, status: body.status, endsAt: body.endsAt ?? null, requestedPlan: null, requestedAt: null, activatedAt: now, activatedById: actorId(req)};
-  const row = await prisma.establishmentSubscription.upsert({
-    where: {placeId}, update: data, create: {placeId, startsAt: now, ...data}, include: {place: true},
-  });
-  await audit(req, placeId, 'ADMIN_SUBSCRIPTION_SET', 'SUBSCRIPTION', row.id, {plan: body.plan, status: body.status});
-  await prisma.placeManager.findMany({where: {placeId}, select: {userId: true}}).then(managers => Promise.all(managers.map(m =>
-    prisma.notification.create({data: {userId: m.userId, title: 'Votre formule Barmej Pro', message: `Votre établissement ${row.place.name} est maintenant en formule ${body.plan}.`}}))));
+  const startsAt = parseDay(body.startsAt), endsAt = parseDay(body.endsAt);
+  if (endsAt < startsAt) return res.status(400).json({message: 'La date de fin doit être après la date de début.'});
+  if (lengthInDays(startsAt, endsAt) > 731) return res.status(400).json({message: 'Une période ne peut pas dépasser 2 ans.'});
+  const place = await prisma.place.findUnique({where: {id: placeId}, select: {name: true}});
+  if (!place) return res.status(404).json({message: 'Établissement introuvable'});
+  const existing = await prisma.subscriptionPeriod.findMany({where: {placeId, cancelledAt: null}});
+  const clash = existing.find(p => overlaps(p, {startsAt, endsAt}));
+  if (clash) {
+    return res.status(409).json({message: `Ces dates chevauchent la période ${planLabelsFr[clash.plan]} du ${dayString(clash.startsAt)} au ${dayString(clash.endsAt)}. Commencez le lendemain de sa fin ou annulez-la.`});
+  }
+  const prices = await planPrices();
+  const amount = body.amount ?? suggestedAmount(prices.get(body.plan), startsAt, endsAt);
+  const period = await prisma.subscriptionPeriod.create({data: {placeId, plan: body.plan, startsAt, endsAt, amount, note: body.note || null, createdById: actorId(req)}});
+  await prisma.establishmentSubscription.updateMany({where: {placeId, requestedPlan: body.plan}, data: {requestedPlan: null, requestedAt: null}});
+  const subscription = await resolveSubscription(placeId);
+  await audit(req, placeId, 'ADMIN_SUBSCRIPTION_PERIOD_ADDED', 'SUBSCRIPTION', period.id, {plan: body.plan, startsAt: body.startsAt, endsAt: body.endsAt, amount});
+  void notifyManagers(placeId, 'Votre formule Barmej Pro', `Formule ${planLabelsFr[body.plan]} pour ${place.name} du ${body.startsAt.split('-').reverse().join('/')} au ${body.endsAt.split('-').reverse().join('/')}.`);
+  return res.status(201).json({period: periodDto(period), subscription: subscriptionRow(subscription)});
+}));
+
+// Annulation d'une période (erreur de saisie, remboursement…).
+adminRouter.post('/subscriptions/periods/:id/cancel', route(async (req, res) => {
+  const period = await prisma.subscriptionPeriod.update({where: {id: positiveId(req.params.id)}, data: {cancelledAt: new Date()}});
+  const today = tunisToday();
+  const sub = await prisma.establishmentSubscription.findUnique({where: {placeId: period.placeId}});
+  // Période en cours annulée : on revient à Découverte, puis on reprend une éventuelle autre période en cours.
+  if (sub && sub.endsAt?.getTime() === period.endsAt.getTime() && period.startsAt <= today) {
+    await prisma.establishmentSubscription.update({where: {placeId: period.placeId}, data: {plan: SubscriptionPlan.DISCOVERY, startsAt: null, endsAt: null}});
+  }
+  const subscription = await resolveSubscription(period.placeId);
+  await audit(req, period.placeId, 'ADMIN_SUBSCRIPTION_PERIOD_CANCELLED', 'SUBSCRIPTION', period.id, {plan: period.plan, amount: period.amount});
+  return res.json({period: periodDto(period), subscription: subscriptionRow(subscription)});
+}));
+
+// Suspension / réactivation de l'abonnement (impayé, abus…).
+adminRouter.put('/subscriptions/:placeId/status', route(async (req, res) => {
+  const placeId = positiveId(req.params.placeId);
+  const {status} = z.object({status: z.enum([SubscriptionStatus.ACTIVE, SubscriptionStatus.SUSPENDED])}).parse(req.body);
+  await resolveSubscription(placeId);
+  const row = await prisma.establishmentSubscription.update({where: {placeId}, data: {status}, include: {place: true}});
+  await audit(req, placeId, 'ADMIN_SUBSCRIPTION_STATUS', 'SUBSCRIPTION', row.id, {status});
   return res.json(subscriptionRow(row));
 }));
 
@@ -233,6 +368,12 @@ adminRouter.delete('/subscriptions/:placeId/request', route(async (req, res) => 
   await audit(req, placeId, 'ADMIN_SUBSCRIPTION_REQUEST_DECLINED', 'SUBSCRIPTION', row.id);
   return res.json(subscriptionRow(row));
 }));
+
+const subscriptionRow = (s: any) => ({
+  placeId: s.placeId, placeName: s.place?.name, plan: s.plan, status: s.status, requestedPlan: s.requestedPlan,
+  requestedAt: s.requestedAt, startsAt: s.startsAt, endsAt: s.endsAt, activatedAt: s.activatedAt, features: subscriptionFeatures(s.plan),
+});
+const planLabelsFr: Record<string, string> = {DISCOVERY: 'Découverte', ESSENTIAL: 'Essentiel', PRO: 'Pro', PREMIUM: 'Premium'};
 
 /* ─────────── Utilisateurs ─────────── */
 adminRouter.get('/users', route(async (req, res) => {

@@ -15,6 +15,7 @@ import {prisma} from './db';
 import {AuthRequest, SUSPENDED_MESSAGE, createSessionTokens, readUserId, requireAuth, revokeRefreshToken, rotateRefreshToken, signReservationTicket, verifyReservationTicket} from './auth';
 import {placeDto, placeInfoDto, userDto} from './mappers';
 import {normalizeSource, summarizeAudience} from './audienceLogic';
+import {catalogWithPrices, resolveSubscription} from './subscriptionSync';
 import {profanityGuard} from './profanity';
 import {markLateReservationsAsNoShow} from './reservationLifecycle';
 import {buildFeed} from './feed';
@@ -494,7 +495,7 @@ const ensurePlaceAccess = async (req: Request, res: Response, placeId: number) =
 const ensureSubscriptionFeature = async (req: Request, res: Response, placeId: number, feature: SubscriptionFeature) => {
   const user = await prisma.user.findUnique({where: {id: authId(req)}, select: {role: true}});
   if (user?.role === UserRole.ADMIN) return true;
-  const subscription = await prisma.establishmentSubscription.upsert({where: {placeId}, update: {}, create: {placeId, plan: SubscriptionPlan.DISCOVERY}});
+  const subscription = await resolveSubscription(placeId);
   if (subscriptionAllows(subscription.plan, subscription.status, feature)) return true;
   res.status(403).json({
     code: 'SUBSCRIPTION_FEATURE_REQUIRED',
@@ -770,23 +771,15 @@ app.get('/pro/places/:placeId/subscription', asyncRoute(async (req, res) => {
   if (!(await ensureScannerAccess(req, res, placeId))) return;
   const place = await prisma.place.findUnique({where: {id: placeId}, select: {id: true}});
   if (!place) return res.status(404).json({message: 'Établissement introuvable'});
-  const subscription = await prisma.establishmentSubscription.upsert({
-    where: {placeId},
-    update: {},
-    create: {placeId, plan: SubscriptionPlan.DISCOVERY},
-  });
-  return res.json({subscription: subscriptionDto(subscription), catalog: subscriptionCatalog});
+  const subscription = await resolveSubscription(placeId);
+  return res.json({subscription: subscriptionDto(subscription), catalog: await catalogWithPrices()});
 }));
 
 app.post('/pro/places/:placeId/subscription/request', asyncRoute(async (req, res) => {
   const placeId = id(req.params.placeId);
   if (!(await ensurePlaceAccess(req, res, placeId))) return;
   const {plan} = z.object({plan: z.nativeEnum(SubscriptionPlan)}).parse(req.body);
-  const current = await prisma.establishmentSubscription.upsert({
-    where: {placeId},
-    update: {},
-    create: {placeId, plan: SubscriptionPlan.DISCOVERY},
-  });
+  const current = await resolveSubscription(placeId);
   if (plan === current.plan) return res.status(409).json({message: 'Cette formule est déjà active'});
   const subscription = await prisma.establishmentSubscription.update({
     where: {placeId},

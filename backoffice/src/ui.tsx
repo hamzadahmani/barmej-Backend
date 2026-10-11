@@ -9,6 +9,7 @@ export const planLabels: Record<string, string> = {DISCOVERY: 'Découverte', ESS
 export const roleLabels: Record<string, string> = {USER: 'Utilisateur', ADMIN: 'Administrateur', ESTABLISHMENT: 'Gérant', SCANNER: 'Contrôle QR'};
 const tone: Record<string, string> = {
   PENDING: 'warn', PROPOSED: 'warn', CONFIRMED: 'good', COMPLETED: 'good', APPROVED: 'good', ACTIVE: 'good',
+  SUB_ACTIVE: 'good', SUB_EXPIRING: 'warn', SUB_SCHEDULED: 'info', SUB_EXPIRED: 'bad', SUB_NONE: 'muted', SUB_CANCELLED: 'muted', SUB_ENDED: 'muted',
   FLAGGED: 'bad', DECLINED: 'bad', CANCELLED: 'muted', NO_SHOW: 'bad', REJECTED: 'bad', SUSPENDED: 'bad', EXPIRED: 'muted',
   DISCOVERY: 'muted', ESSENTIAL: 'info', PRO: 'brand', PREMIUM: 'gold', ADMIN: 'brand', ESTABLISHMENT: 'info', SCANNER: 'info', USER: 'muted',
 };
