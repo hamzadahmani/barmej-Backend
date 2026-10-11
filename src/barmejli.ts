@@ -20,6 +20,8 @@ const requestSchema = z.object({
   budget: z.number().int().min(0).max(10_000).optional(),
   mood: z.string().trim().min(2).max(40).optional(),
   groupType: z.string().trim().min(2).max(40).optional(),
+  // Mode « Juste une adresse » de l'app (ancien Assistant Barmej) : stepCount = 1.
+  stepCount: z.number().int().min(1).max(5).optional(),
 }).refine(value => (value.latitude === undefined) === (value.longitude === undefined), {message: 'Indiquez la latitude et la longitude ensemble.'});
 
 function categoryName(value: string) {
@@ -190,11 +192,17 @@ async function createPlan(ownerId: number, prompt: string, parsed: ParsedOuting,
 
 barmejliRouter.post('/generate', route(async (req: AuthRequest, res) => {
   const body = requestSchema.parse(req.body);
-  const extracted = parseOutingPrompt(body.prompt);
+  // Le nombre d'étapes choisi dans l'app est ajouté à la demande enregistrée :
+  // « Autre idée » et « Changer » le retrouvent en relisant la phrase.
+  const firstRead = parseOutingPrompt(body.prompt);
+  const prompt = body.stepCount && firstRead.stepCount === undefined
+    ? `${body.prompt} (${body.stepCount === 1 ? '1 adresse' : `${body.stepCount} étapes`})`
+    : body.prompt;
+  const extracted = prompt === body.prompt ? firstRead : parseOutingPrompt(prompt);
   const parsed = {...extracted, scheduledAt: body.scheduledAt ?? extracted.scheduledAt, budget: body.budget ?? extracted.budget, mood: body.mood ?? extracted.mood, groupType: body.groupType ?? extracted.groupType};
   const location = await resolveLocation(parsed, body.latitude, body.longitude);
   const weather = await getForecast(location.latitude, location.longitude, parsed.scheduledAt);
-  const plan = await createPlan(userId(req), body.prompt, parsed, location.latitude, location.longitude, weather, undefined, searchRadii(parsed.city, body.latitude !== undefined));
+  const plan = await createPlan(userId(req), prompt, parsed, location.latitude, location.longitude, weather, undefined, searchRadii(parsed.city, body.latitude !== undefined));
   return res.status(201).json(planDto(plan));
 }));
 

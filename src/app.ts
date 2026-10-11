@@ -12,14 +12,17 @@ import {FeedEventType, GroupPlanStatus, LoyaltyRedemptionStatus, LoyaltyTransact
 import {v2 as cloudinary} from 'cloudinary';
 import {config} from './config';
 import {prisma} from './db';
-import {AuthRequest, createSessionTokens, requireAuth, revokeRefreshToken, rotateRefreshToken, signReservationTicket, verifyReservationTicket} from './auth';
+import {AuthRequest, createSessionTokens, readUserId, requireAuth, revokeRefreshToken, rotateRefreshToken, signReservationTicket, verifyReservationTicket} from './auth';
 import {placeDto, placeInfoDto, userDto} from './mappers';
+import {normalizeSource, summarizeAudience} from './audienceLogic';
+import {profanityGuard} from './profanity';
 import {markLateReservationsAsNoShow} from './reservationLifecycle';
 import {buildFeed} from './feed';
 import {cacheMode, consumeRateLimit, invalidateUserFeed, rememberSeenVideos} from './cache';
 import {minimumPlanForFeature, subscriptionAllows, subscriptionCatalog, subscriptionDto, SubscriptionFeature} from './subscriptions';
 import {barmejliRouter} from './barmejli';
 import {staysRouter} from './stays';
+import {adminRouter} from './admin';
 import {canMoveStay, roomsLeft} from './staysLogic';
 import {interestCatalog, interestKeys} from './interests';
 import {discoveryRouter} from './discovery';
@@ -30,6 +33,7 @@ app.disable('x-powered-by');
 app.use(helmet());
 app.use(cors({origin: config.CORS_ORIGIN === '*' ? true : config.CORS_ORIGIN.split(',')}));
 app.use(express.json({limit: '8mb'}));
+app.use(profanityGuard);
 app.use(hideDemoLabels);
 if (config.NODE_ENV !== 'test') app.use(morgan('combined'));
 
@@ -170,12 +174,35 @@ app.get('/getPlaceByCategory/:categoryId', asyncRoute(async (req, res) => {
   return res.json(rows.map(placeDto));
 }));
 
+/**
+ * Compte une ouverture de fiche (statistiques). Une même personne n'est comptée
+ * qu'une fois par demi-heure, et l'équipe de l'établissement n'est jamais comptée.
+ */
+const recordPlaceView = async (placeId: number, userId: number | undefined, source: unknown) => {
+  try {
+    if (userId) {
+      const [recent, manager] = await Promise.all([
+        prisma.placeView.findFirst({where: {placeId, userId, createdAt: {gte: new Date(Date.now() - 30 * 60_000)}}, select: {id: true}}),
+        prisma.placeManager.findUnique({where: {userId_placeId: {userId, placeId}}, select: {id: true}}),
+      ]);
+      if (recent || manager) return;
+    }
+    await prisma.placeView.create({data: {placeId, userId: userId ?? null, source: normalizeSource(source)}});
+  } catch (error) {
+    if (config.NODE_ENV !== 'test') console.warn('Vue de fiche non enregistrée', error);
+  }
+};
+
 app.get('/getPlaceInfoByIdPlace/:placeId', asyncRoute(async (req, res) => {
   const today = dateOnly(new Date().toISOString().slice(0, 10));
-  const place = await prisma.place.findUnique({where: {id: id(req.params.placeId)}, include: {media: {orderBy: [{type: 'asc'}, {sortOrder: 'asc'}, {createdAt: 'asc'}]}, events: {where: {active: true, OR: [{endDate: {gte: today}}, {endDate: null, startDate: {gte: today}}, {endDate: null, startDate: null}]}, orderBy: [{startDate: 'asc'}, {createdAt: 'desc'}]}, reviews: {select: {cuisineRating: true, serviceRating: true, ambianceRating: true, priceRating: true}}}});
+  const place = await prisma.place.findUnique({where: {id: id(req.params.placeId)}, include: {media: {where: {active: true, moderationStatus: 'APPROVED'}, orderBy: [{type: 'asc'}, {sortOrder: 'asc'}, {createdAt: 'asc'}]}, menus: {where: {active: true, validatedAt: {not: null}}, orderBy: {validatedAt: 'desc'}, take: 5}, events: {where: {active: true, OR: [{endDate: {gte: today}}, {endDate: null, startDate: {gte: today}}, {endDate: null, startDate: null}]}, orderBy: [{startDate: 'asc'}, {createdAt: 'desc'}]}, reviews: {select: {cuisineRating: true, serviceRating: true, ambianceRating: true, priceRating: true}}}});
   if (!place) return res.status(404).json({message: 'Lieu introuvable'});
+  // Seul l'écran de la fiche envoie `source` : réservation et séjour relisent la fiche sans compter de vue.
+  if (req.query.source !== undefined) void recordPlaceView(place.id, readUserId(req), req.query.source);
   const rating = place.reviewsEnabled && place.reviews.length ? place.reviews.reduce((sum, review) => sum + (review.cuisineRating + review.serviceRating + review.ambianceRating + review.priceRating) / 4, 0) / place.reviews.length : null;
-  return res.json({place: {...placeDto(place), rating: rating ? Math.round(rating * 10) / 10 : null, reviewCount: place.reviewsEnabled ? place.reviews.length : 0}, placeinfo: placeInfoDto(place), media: place.media.map(mediaDto), events: place.events.map(eventDto)});
+  return res.json({place: {...placeDto(place), rating: rating ? Math.round(rating * 10) / 10 : null, reviewCount: place.reviewsEnabled ? place.reviews.length : 0}, placeinfo: placeInfoDto(place), media: place.media.map(mediaDto), events: place.events.map(eventDto),
+    // Menus validés par l'établissement, affichés sur la fiche (prix en millimes).
+    menus: place.menus.map(menu => ({id: menu.id, imageUrl: menu.imageUrl, validatedAt: menu.validatedAt, items: Array.isArray(menu.items) ? menu.items : []}))});
 }));
 
 app.get('/getFeaturedPlaces', asyncRoute(async (_req, res) => {
@@ -326,6 +353,8 @@ app.get('/places/:placeId/reviews', asyncRoute(async (req, res) => {
   return res.json({enabled: true, average, count: rows.length, reviews: rows.map(row => ({...row, userName: `${row.user.firstName} ${row.user.lastName.charAt(0)}.`.trim()}))});
 }));
 
+// Ancien « Assistant Barmej » : remplacé dans l'app par Barmejli (mode « Juste une adresse »).
+// Gardé pour les versions de l'app déjà installées ; à supprimer quand elles auront disparu.
 app.get('/assistant/suggestions', asyncRoute(async (req, res) => {
   const query = z.object({q: z.string().trim().max(200).default(''), budget: z.coerce.number().positive().max(10000).optional(), occasion: z.string().trim().max(50).optional()}).parse(req.query);
   const terms = `${query.q} ${query.occasion ?? ''}`.toLowerCase().split(/\s+/).filter(Boolean);
@@ -370,6 +399,7 @@ app.get('/tickets/:token', asyncRoute(async (req, res) => {
 app.use(requireAuth);
 app.use('/v1/barmejli', barmejliRouter);
 app.use('/v1/stays', staysRouter);
+app.use('/admin/v1', adminRouter);
 
 app.get('/interest-categories', (_req, res) => res.json(interestCatalog));
 
@@ -1039,9 +1069,10 @@ app.get('/loyalty/:placeId', asyncRoute(async (req, res) => {
     prisma.loyaltyRedemption.findMany({where: {userId: authId(req), placeId}, include: {reward: true}, orderBy: {createdAt: 'desc'}, take: 20}),
     prisma.loyaltyTransaction.findMany({where: {userId: authId(req), placeId}, orderBy: {createdAt: 'desc'}, take: 30}),
   ]);
-  if (!program?.enabled) return res.status(404).json({message: 'Programme de fidélité indisponible'});
+  // Pas de programme (cas le plus courant) : réponse normale, la fiche n'affiche simplement pas la carte fidélité.
+  if (!program?.enabled) return res.json({placeId, enabled: false, balance: account?.balance ?? 0, lifetimePoints: account?.lifetimePoints ?? 0, pointsPerVisit: 0, rewards: [], redemptions, transactions});
   const balance = account?.balance ?? 0;
-  return res.json({placeId, placeName: program.place.name, placeImage: program.place.image, balance, lifetimePoints: account?.lifetimePoints ?? 0, pointsPerVisit: program.pointsPerVisit, rewards: program.rewards.map(reward => rewardDto(reward, balance)), redemptions, transactions});
+  return res.json({placeId, enabled: true, placeName: program.place.name, placeImage: program.place.image, balance, lifetimePoints: account?.lifetimePoints ?? 0, pointsPerVisit: program.pointsPerVisit, rewards: program.rewards.map(reward => rewardDto(reward, balance)), redemptions, transactions});
 }));
 
 app.post('/loyalty/rewards/:rewardId/claim', asyncRoute(async (req, res) => {
@@ -1170,7 +1201,41 @@ app.get('/pro/dashboard', asyncRoute(async (req, res) => {
     prisma.waitlistEntry.count({where: {placeId, status: WaitlistStatus.WAITING}}),
     prisma.reservation.findMany({where: {placeId, reservationDate: {gte: today}, status: {in: [ReservationStatus.PENDING, ReservationStatus.PROPOSED, ReservationStatus.CONFIRMED]}}, include: {user: true, place: true}, orderBy: [{reservationDate: 'asc'}, {reservationTime: 'asc'}], take: 6}),
   ]);
-  return res.json({pending, confirmedToday, guestsToday: guestsToday._sum.numberOfPersons ?? 0, waitlist, upcoming: upcoming.map(row => ({...reservationDto(row), customerName: `${row.user.firstName} ${row.user.lastName}`.trim(), customerMobile: row.user.mobile}))});
+  // Séjours (maisons d'hôtes) : demandes à confirmer, arrivées du jour et chambres occupées ce soir.
+  const tomorrow = new Date(today.getTime() + 86_400_000);
+  const [pendingStays, arrivalsToday, tonight, upcomingStays] = await Promise.all([
+    prisma.stayBooking.count({where: {placeId, status: {in: [ReservationStatus.PENDING, ReservationStatus.PROPOSED]}}}),
+    prisma.stayBooking.count({where: {placeId, status: ReservationStatus.CONFIRMED, checkIn: today}}),
+    prisma.stayBooking.aggregate({where: {placeId, status: ReservationStatus.CONFIRMED, checkIn: {lt: tomorrow}, checkOut: {gt: today}}, _sum: {rooms: true}}),
+    prisma.stayBooking.findMany({where: {placeId, checkOut: {gt: today}, status: {in: [ReservationStatus.PENDING, ReservationStatus.PROPOSED, ReservationStatus.CONFIRMED]}}, include: {place: true, user: true}, orderBy: [{checkIn: 'asc'}, {createdAt: 'asc'}], take: 6}),
+  ]);
+  return res.json({
+    pending, confirmedToday, guestsToday: guestsToday._sum.numberOfPersons ?? 0, waitlist,
+    upcoming: upcoming.map(row => ({...reservationDto(row), customerName: `${row.user.firstName} ${row.user.lastName}`.trim(), customerMobile: row.user.mobile})),
+    stays: {pending: pendingStays, arrivalsToday, roomsTonight: tonight._sum.rooms ?? 0, upcoming: upcomingStays.map(stayDto)},
+  });
+}));
+
+// Audience (vues de la fiche et des vidéos) : incluse dans toutes les formules.
+app.get('/pro/audience', asyncRoute(async (req, res) => {
+  const query = z.object({
+    placeId: z.coerce.number().int().positive(),
+    days: z.coerce.number().int().min(7).max(90).default(30),
+  }).parse(req.query);
+  if (!(await ensurePlaceAccess(req, res, query.placeId))) return;
+  if (!(await ensureSubscriptionFeature(req, res, query.placeId, 'BASIC_STATS'))) return;
+  const now = new Date();
+  const since = new Date(now.getTime() - query.days * 86_400_000);
+  const previousSince = new Date(since.getTime() - query.days * 86_400_000);
+  const videoTypes = [FeedEventType.VIDEO_START, FeedEventType.VIDEO_25_PERCENT, FeedEventType.VIDEO_50_PERCENT, FeedEventType.VIDEO_75_PERCENT, FeedEventType.VIDEO_COMPLETE, FeedEventType.VIDEO_SKIP, FeedEventType.PLACE_OPEN];
+  const [views, previousViews, videoEvents, previousVideoViews, videos] = await Promise.all([
+    prisma.placeView.findMany({where: {placeId: query.placeId, createdAt: {gte: since}}, select: {userId: true, source: true, createdAt: true}}),
+    prisma.placeView.count({where: {placeId: query.placeId, createdAt: {gte: previousSince, lt: since}}}),
+    prisma.feedEvent.findMany({where: {placeId: query.placeId, occurredAt: {gte: since}, type: {in: videoTypes}}, select: {type: true, userId: true, sessionId: true, videoId: true, watchMs: true, occurredAt: true}}),
+    prisma.feedEvent.count({where: {placeId: query.placeId, occurredAt: {gte: previousSince, lt: since}, type: FeedEventType.VIDEO_START}}),
+    prisma.placeMedia.findMany({where: {placeId: query.placeId, type: PlaceMediaType.VIDEO}, select: {id: true, secureUrl: true, createdAt: true}}),
+  ]);
+  return res.json(summarizeAudience({days: query.days, now, views, previousViews, videoEvents, previousVideoViews, videos}));
 }));
 
 app.get('/pro/statistics', asyncRoute(async (req, res) => {

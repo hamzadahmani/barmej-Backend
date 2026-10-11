@@ -332,6 +332,20 @@ async function main() {
     const exists = await prisma.notification.findFirst({where: {userId: demoUser.id, title: notification.title}});
     if (!exists) await prisma.notification.create({data: {...notification, userId: demoUser.id}});
   }
+
+  // Compte administrateur du backoffice, créé uniquement si ADMIN_EMAIL et ADMIN_PASSWORD sont définis
+  // (variables d'environnement : aucun mot de passe d'administrateur n'est écrit dans le code).
+  const adminEmail = process.env.ADMIN_EMAIL?.toLowerCase().trim();
+  const adminPassword = process.env.ADMIN_PASSWORD;
+  if (adminEmail && adminPassword && adminPassword.length >= 8) {
+    const existingAdmin = await prisma.user.findUnique({where: {email: adminEmail}});
+    if (existingAdmin) {
+      if (existingAdmin.role !== UserRole.ADMIN) await prisma.user.update({where: {id: existingAdmin.id}, data: {role: UserRole.ADMIN}});
+    } else {
+      await prisma.user.create({data: {email: adminEmail, passwordHash: await bcrypt.hash(adminPassword, 12), firstName: 'Admin', lastName: 'Barmej', role: UserRole.ADMIN}});
+    }
+    console.log(`Administrateur du backoffice : ${adminEmail}`);
+  }
 }
 
 main()

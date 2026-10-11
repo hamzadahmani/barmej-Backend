@@ -1,0 +1,18 @@
+[
+  {"name": "Tacos Classic (L)", "priceMillimes": 12900, "kind": "MAIN", "available": true},
+  {"name": "Tacos Classic (2XL)", "priceMillimes": 17900, "kind": "MAIN", "available": true},
+  {"name": "Tacos Crispy (L)", "priceMillimes": 12900, "kind": "MAIN", "available": true},
+  {"name": "Tacos Crispy (2XL)", "priceMillimes": 17900, "kind": "MAIN", "available": true},
+  {"name": "Tacos Super Spicy (L)", "priceMillimes": 13900, "kind": "MAIN", "available": true},
+  {"name": "Tacos Super Spicy (2XL)", "priceMillimes": 18900, "kind": "MAIN", "available": true},
+  {"name": "Tacos Creamy Mushroom (L)", "priceMillimes": 14900, "kind": "MAIN", "available": true},
+  {"name": "Tacos Creamy Mushroom (2XL)", "priceMillimes": 19900, "kind": "MAIN", "available": true},
+  {"name": "Tacos Full Cheese (L)", "priceMillimes": 16900, "kind": "MAIN", "available": true},
+  {"name": "Tacos Full Cheese (2XL)", "priceMillimes": 21900, "kind": "MAIN", "available": true},
+  {"name": "Tacos Mr Bacon (L)", "priceMillimes": 18900, "kind": "MAIN", "available": true},
+  {"name": "Tacos Mr Bacon (2XL)", "priceMillimes": 23900, "kind": "MAIN", "available": true},
+  {"name": "Tacos Brisket Lab (L)", "priceMillimes": 23900, "kind": "MAIN", "available": true},
+  {"name": "Tacos Brisket Lab (2XL)", "priceMillimes": 29900, "kind": "MAIN", "available": true},
+  {"name": "Tacos Texas Ribs (L)", "priceMillimes": 24900, "kind": "MAIN", "available": true},
+  {"name": "Tacos Texas Ribs (2XL)", "priceMillimes": 33900, "kind": "MAIN", "available": true}
+]

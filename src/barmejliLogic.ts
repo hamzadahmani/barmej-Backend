@@ -1,3 +1,4 @@
+import {derjaToFrench} from './derja';
 import type {MenuSelection} from './menuLogic';
 export type ParsedOuting = {
   city: string;
@@ -150,7 +151,9 @@ export function isCoherent(steps: Candidate[]) {
   return meal === -1 || dessert === -1 || dessert > meal;
 }
 
-export function parseOutingPrompt(prompt: string, now = new Date()): ParsedOuting {
+export function parseOutingPrompt(rawPrompt: string, now = new Date()): ParsedOuting {
+  // La derja (arabizi ou arabe) est d'abord ramenée aux mots-clés français.
+  const prompt = derjaToFrench(rawPrompt);
   const text = normalize(prompt).replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)));
   const budgetMatch = text.match(/(\d{1,5}(?:[.,]\d{1,2})?)\s*(?:dt|tnd|dinars?\b|دينار|دنانير)/i)
     ?? text.match(/\bbudget\s*(?:de|:)?\s*(\d{1,5}(?:[.,]\d{1,2})?)/);
@@ -172,7 +175,7 @@ export function parseOutingPrompt(prompt: string, now = new Date()): ParsedOutin
   if (hour > 23 || Number(explicitTime?.[2] ?? 0) > 59) throw Object.assign(new Error('Indiquez un horaire valide, par exemple 19h30.'), {statusCode: 400});
   scheduledAt.setHours(hour, explicitTime ? Number(explicitTime[2] ?? 0) : 30, 0, 0);
   const mood = /romanti|couple|en amoureux|date\b/.test(text) ? 'romantique' : /festif|fete|danser|party/.test(text) ? 'festif' : /calme|chill|detente|هادي|هادئ/.test(text) ? 'calme' : /famill|عائلة/.test(text) ? 'familial' : 'decouverte';
-  const groupType = /famill|enfant|عائلة/.test(text) ? 'famille' : /amis|copains|groupe|صحابي/.test(text) ? 'amis' : /solo|seul|وحدي/.test(text) ? 'solo' : /romanti|couple|amoureux|date\b/.test(text) ? 'couple' : 'amis';
+  const groupType = /famill|enfant|عائلة/.test(text) ? 'famille' : /amis|copains|groupe|صحابي/.test(text) ? 'amis' : /solo|\bseule?\b(?!\s+(?:adresse|etape|lieu|endroit|arret|stop))|وحدي/.test(text) ? 'solo' : /romanti|couple|amoureux|date\b/.test(text) ? 'couple' : 'amis';
   const perPerson = /par personne|chacun|\/\s*personne/.test(text);
   const peopleMatch = text.match(/\b(\d{1,2})\s*(?:personnes?|amis|adultes?)\b/);
   const people = peopleMatch ? Number(peopleMatch[1]) : groupType === 'couple' ? 2 : groupType === 'solo' ? 1 : undefined;
@@ -385,7 +388,10 @@ export function buildItinerary(input: ParsedOuting, weather: Weather, candidates
   // Une sortie du soir ou du midi sans repas n'est retenue que si aucun repas n'est possible.
   // Le nombre d'étapes demandé prime : un programme plus court n'est retenu que faute de mieux.
   const stepPenalty = (state: State) => input.stepCount && state.steps.length !== input.stepCount ? 20 * Math.abs(input.stepCount - state.steps.length) : 0;
-  const finalScore = (state: State) => state.score - stepPenalty(state) - (anchored && !state.steps.some(step => roleOf(step) === 'meal') ? 6 : 0);
+  // Pour une seule adresse, la catégorie demandée (« café », « brunch »…) prime sur le repas du soir.
+  const singleWithPreference = input.stepCount === 1 && (input.preferredCategories?.length ?? 0) > 0 && !input.preferredCategories!.includes('restaurant');
+  const mealRequired = anchored && !singleWithPreference;
+  const finalScore = (state: State) => state.score - stepPenalty(state) - (mealRequired && !state.steps.some(step => roleOf(step) === 'meal') ? 6 : 0);
   states.sort((a, b) => finalScore(b) - finalScore(a) || a.cost - b.cost);
   const selected = states[0]!.steps;
   if (!selected.length) throw Object.assign(new Error('Aucune adresse disponible ne correspond à votre budget de ' + input.budget + ' DT, à ces horaires et à la météo. Essayez un autre horaire, une autre ville ou ajustez votre budget.'), {statusCode: 422});

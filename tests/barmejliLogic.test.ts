@@ -259,3 +259,25 @@ describe('Barmejli zone et nombre d’étapes', () => {
     expect(result.radiusKm).toBe(25);
   });
 });
+
+describe('Barmejli « Juste une adresse » (ancien Assistant Barmej)', () => {
+  const pool = [
+    candidate({placeId: 1, name: 'North Shore Coffee', category: 'cafe', price: 15}),
+    candidate({placeId: 2, name: 'Agora', category: 'activity', price: 25}),
+    candidate({placeId: 3, name: 'The Cliff', category: 'restaurant', price: 45, moods: ['calme']}),
+  ];
+  const now = new Date('2026-09-01T10:00:00+02:00');
+
+  it('returns the single best restaurant when one address is requested', () => {
+    const input = parseOutingPrompt('Resto calme à La Marsa samedi soir, 60 DT (une seule adresse)', now);
+    expect(input.stepCount).toBe(1);
+    const result = buildItinerary(input, fair, pool);
+    expect(result.steps.map(step => step.name)).toEqual(['The Cliff']);
+  });
+
+  it('respects the requested category instead of forcing dinner', () => {
+    const input = parseOutingPrompt('Café à La Marsa samedi soir, 30 DT (une seule adresse)', now);
+    const result = buildItinerary(input, fair, pool);
+    expect(result.steps.map(step => step.name)).toEqual(['North Shore Coffee']);
+  });
+});

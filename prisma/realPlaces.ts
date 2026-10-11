@@ -148,7 +148,7 @@ export const realPlaces: RealPlace[] = [
 
   // ───────────── Balades gratuites ─────────────
   {name: 'Balade dans la médina de Tunis', categoryId: 3, subtitle: 'Souks, Zitouna et ruelles historiques', address: 'Médina de Tunis, depuis Bab Bhar', latitude: 36.7990, longitude: 10.1760, averagePrice: 0, description: 'Promenade libre dans les souks et ruelles de la médina, classée au patrimoine mondial.', keywords: ['walks', 'culture'], moods: ['decouverte', 'calme', 'familial'], groups: ALL, environment: OUTDOOR, weatherSensitive: true, durationMin: 60, image: photo.culture, source: 'https://generationvoyage.fr/?p=283797'},
-  {name: 'Lab Station', categoryId: 1, subtitle: 'Burgers, tacos et smokehouse', address: 'Avenue Hédi Nouira, Ennasr, Ariana', latitude: 36.8558, longitude: 10.1586, phone: '+216 21 722 108', averagePrice: 18, hours: {open: '12:00', close: '01:00', days: {5: {open: '14:00', close: '01:00'}}}, description: 'Burgers gourmands (Classic, Burger Lab, Texas, Crispy Chicken), tacos, ribs et brisket fumé. Ouvert tard, jusqu’à 1h du matin.', keywords: ['restaurant', 'fast_food'], moods: ['festif', 'decouverte'], groups: ALL, environment: INDOOR, durationMin: 60, image: photo.street, source: 'https://lab-station.grubbio.com/'},
+  {name: 'Lab Station', categoryId: 1, subtitle: 'Burgers, brisket et crinkle fries', address: 'Avenue Hédi Nouira, Ennasr, Ariana (V545+79Q)', latitude: 36.8557, longitude: 10.1585, phone: '+216 50 708 979', averagePrice: 25, hours: {open: '11:30', close: '01:00', days: {5: {open: '14:00', close: '01:00'}}}, description: 'Burger house d’Ennasr noté 4,5/5 sur Google (2 374 avis) : Creamy Mushroom, Brisket Lab, burger fondant, wraps au poulet et crinkle fries. Terrasse et chaises hautes. Sur place sans réservation, 20 à 30 DT par personne.', keywords: ['restaurant', 'fast_food', 'burger', 'terrasse'], moods: ['festif', 'decouverte'], groups: ALL, environment: MIXED, durationMin: 60, image: photo.street, source: 'https://maps.google.com/?q=Lab+Station+V545%2B79Q+Ariana'},
   {name: 'Corniche des Berges du Lac', categoryId: 3, subtitle: 'Promenade au bord du lac', address: 'Corniche des Berges du Lac, Tunis', latitude: 36.8325, longitude: 10.2390, averagePrice: 0, description: 'Promenade piétonne au bord du lac, animée en soirée.', keywords: ['walks'], moods: ['calme', 'romantique', 'familial'], groups: ALL, environment: OUTDOOR, weatherSensitive: true, durationMin: 45, image: photo.terrace, source: S.lonely},
   // ───────────── Maisons d'hôtes (catégorie 4) ─────────────
   // Tarifs « dès … la nuit » repris de l'annuaire maisonsdhotestunisie.com ou du site de la maison :
@@ -184,6 +184,11 @@ export async function seedRealPlaces(prisma: import('@prisma/client').PrismaClie
     const {replaces, hours, keywords, moods, groups, durationMin, source: _source, nightlyPrice, roomCount, ...fields} = place;
     const existing = await prisma.place.findFirst({where: {name: place.name}})
       ?? (replaces ? await prisma.place.findFirst({where: {name: replaces}}) : null);
+    // Fiche déjà reprise en main (vraie photo, vérifiée dans le backoffice) : le seed ne l'écrase plus.
+    if (existing && (existing.verified || (existing.image && !existing.image.includes('images.unsplash.com')))) {
+      saved.push(existing);
+      continue;
+    }
     const data = {
       ...fields,
       phone: fields.phone ?? null,

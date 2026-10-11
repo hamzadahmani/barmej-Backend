@@ -49,6 +49,8 @@ export const placeDto = (p: PlaceWithCategories) => ({
   reviewsEnabled: p.reviewsEnabled,
   cuisineType: p.cuisineType,
   ambienceTags: p.ambienceTags,
+  nightlyPrice: p.nightlyPrice,
+  roomCount: p.roomCount,
 });
 
 export const placeInfoDto = (p: Place) => ({

@@ -123,6 +123,7 @@ model User {
   barmejliPlans       BarmejliPlan[]
   refreshTokens       RefreshToken[]
   stayBookings        StayBooking[]
+  placeViews          PlaceView[]
 
   @@map("users")
 }
@@ -214,6 +215,7 @@ model Place {
   itinerarySteps      BarmejliStep[]
   menus               PlaceMenu[]
   stayBookings        StayBooking[]
+  views               PlaceView[]
 
   @@index([categoryId])
   @@map("places")
@@ -836,4 +838,20 @@ model StayBooking {
   @@index([userId])
   @@index([placeId, checkIn, checkOut, status])
   @@map("stay_bookings")
+}
+
+/// Ouverture d'une fiche établissement dans l'app (toutes origines : fil vidéo, listes, recherche, Barmejli…).
+model PlaceView {
+  id        BigInt   @id @default(autoincrement())
+  placeId   Int      @map("place_id")
+  userId    Int?     @map("user_id")
+  source    String   @default("app") @db.VarChar(30)
+  createdAt DateTime @default(now()) @map("created_at")
+  place     Place    @relation(fields: [placeId], references: [id], onDelete: Cascade)
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([placeId, createdAt])
+  @@index([createdAt])
+  @@index([userId, placeId, createdAt])
+  @@map("place_views")
 }

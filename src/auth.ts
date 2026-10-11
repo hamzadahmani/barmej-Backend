@@ -64,3 +64,15 @@ export function requireAuth(req: Request, res: Response, next: NextFunction) {
     return res.status(401).json({message: 'Jeton invalide ou expiré'});
   }
 }
+
+/** Identifiant de l'utilisateur si un jeton valide est fourni, sinon undefined (routes publiques). */
+export function readUserId(req: Request): number | undefined {
+  const token = req.header('authorization')?.replace(/^Bearer\s+/i, '');
+  if (!token) return undefined;
+  try {
+    const userId = Number((jwt.verify(token, config.JWT_SECRET) as jwt.JwtPayload).sub);
+    return Number.isInteger(userId) ? userId : undefined;
+  } catch {
+    return undefined;
+  }
+}
