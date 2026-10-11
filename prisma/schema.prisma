@@ -93,6 +93,9 @@ model User {
   photo               String?              @map("photo")
   birthDate           DateTime?            @map("birth_date") @db.Date
   role                UserRole             @default(USER)
+  /// Compte suspendu par l'équipe Barmej : plus de connexion ni d'accès à l'API.
+  suspendedAt         DateTime?            @map("suspended_at")
+  suspendedReason     String?              @map("suspended_reason")
   externalId          String?              @unique @map("external_id")
   latitude            Float?
   longitude           Float?
@@ -587,14 +590,15 @@ model Reservation {
 model AuditLog {
   id         Int      @id @default(autoincrement()) @map("id_audit_log")
   placeId    Int      @map("place_id")
-  actorId    Int      @map("actor_id")
+  actorId    Int?     @map("actor_id")
   action     String
   entityType String   @map("entity_type")
   entityId   Int?     @map("entity_id")
   details    Json?
   createdAt  DateTime @default(now()) @map("created_at")
   place      Place    @relation(fields: [placeId], references: [id], onDelete: Cascade)
-  actor      User     @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  // Compte supprimé : l'historique est gardé, sans auteur.
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
 
   @@index([placeId, createdAt])
   @@index([actorId])

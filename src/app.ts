@@ -12,7 +12,7 @@ import {FeedEventType, GroupPlanStatus, LoyaltyRedemptionStatus, LoyaltyTransact
 import {v2 as cloudinary} from 'cloudinary';
 import {config} from './config';
 import {prisma} from './db';
-import {AuthRequest, createSessionTokens, readUserId, requireAuth, revokeRefreshToken, rotateRefreshToken, signReservationTicket, verifyReservationTicket} from './auth';
+import {AuthRequest, SUSPENDED_MESSAGE, createSessionTokens, readUserId, requireAuth, revokeRefreshToken, rotateRefreshToken, signReservationTicket, verifyReservationTicket} from './auth';
 import {placeDto, placeInfoDto, userDto} from './mappers';
 import {normalizeSource, summarizeAudience} from './audienceLogic';
 import {profanityGuard} from './profanity';
@@ -121,6 +121,7 @@ app.post('/authenticate', asyncRoute(async (req, res) => {
   if (!user?.passwordHash || !(await bcrypt.compare(body.userPwd, user.passwordHash))) {
     return res.status(401).json({message: 'Email ou mot de passe incorrect'});
   }
+  if (user.suspendedAt) return res.status(403).json({message: SUSPENDED_MESSAGE, code: 'ACCOUNT_SUSPENDED'});
   return res.json({...await createSessionTokens(user.id), ...userDto(user)});
 }));
 
@@ -147,6 +148,7 @@ app.post('/auth-external', asyncRoute(async (req, res) => {
     update: {externalId: source.id, photo: source.photo},
     create: {email, externalId: source.id, firstName: names.shift() || 'Utilisateur', lastName: names.join(' '), photo: source.photo},
   });
+  if (user.suspendedAt) return res.status(403).json({message: SUSPENDED_MESSAGE, code: 'ACCOUNT_SUSPENDED'});
   return res.json({...await createSessionTokens(user.id), ...userDto(user)});
 }));
 
@@ -1363,7 +1365,7 @@ app.get('/pro/audit-logs', asyncRoute(async (req, res) => {
   if (!(await ensurePlaceAccess(req, res, query.placeId))) return;
   if (!(await ensureSubscriptionFeature(req, res, query.placeId, 'CUSTOMER_INSIGHTS'))) return;
   const logs = await prisma.auditLog.findMany({where: {placeId: query.placeId}, include: {actor: {select: {firstName: true, lastName: true, role: true}}}, orderBy: {createdAt: 'desc'}, take: query.limit});
-  return res.json(logs.map(log => ({id: log.id, action: log.action, entityType: log.entityType, entityId: log.entityId, details: log.details, createdAt: log.createdAt, actorName: `${log.actor.firstName} ${log.actor.lastName}`.trim(), actorRole: log.actor.role})));
+  return res.json(logs.map(log => ({id: log.id, action: log.action, entityType: log.entityType, entityId: log.entityId, details: log.details, createdAt: log.createdAt, actorName: log.actor ? `${log.actor.firstName} ${log.actor.lastName}`.trim() : 'Compte supprimé', actorRole: log.actor?.role ?? null})));
 }));
 
 app.post('/pro/tickets/scan', asyncRoute(async (req, res) => {

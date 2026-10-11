@@ -21,8 +21,8 @@ export async function createSessionTokens(userId: number) {
 export async function rotateRefreshToken(rawToken: string) {
   const tokenHash = refreshHash(rawToken);
   return prisma.$transaction(async tx => {
-    const current = await tx.refreshToken.findUnique({where: {tokenHash}});
-    if (!current || current.revokedAt || current.expiresAt <= new Date()) return null;
+    const current = await tx.refreshToken.findUnique({where: {tokenHash}, include: {user: {select: {suspendedAt: true}}}});
+    if (!current || current.revokedAt || current.expiresAt <= new Date() || current.user.suspendedAt) return null;
     const refreshToken = randomBytes(48).toString('base64url');
     const replacementHash = refreshHash(refreshToken);
     const revoked = await tx.refreshToken.updateMany({
@@ -51,18 +51,43 @@ export const verifyReservationTicket = (token: string) => {
   return {reservationId, userId};
 };
 
+export const SUSPENDED_MESSAGE = 'Votre compte Barmej est suspendu. Contactez le support Barmej pour en savoir plus.';
+
+/**
+ * Suspension des comptes : vérifiée à chaque requête authentifiée, avec un petit
+ * cache (30 s) pour ne pas interroger la base à chaque appel.
+ */
+const suspensionCache = new Map<number, {suspended: boolean; checkedAt: number}>();
+const SUSPENSION_TTL_MS = 30_000;
+export const forgetSuspension = (userId: number) => suspensionCache.delete(userId);
+export async function isSuspended(userId: number) {
+  const cached = suspensionCache.get(userId);
+  if (cached && Date.now() - cached.checkedAt < SUSPENSION_TTL_MS) return cached.suspended;
+  try {
+    const user = await prisma.user.findUnique({where: {id: userId}, select: {suspendedAt: true}});
+    const suspended = Boolean(user?.suspendedAt);
+    suspensionCache.set(userId, {suspended, checkedAt: Date.now()});
+    return suspended;
+  } catch {
+    return false; // Base indisponible : la requête échouera de toute façon plus loin.
+  }
+}
+
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const token = req.header('authorization')?.replace(/^Bearer\s+/i, '');
   if (!token) return res.status(401).json({message: 'Authentification requise'});
+  let userId: number;
   try {
     const payload = jwt.verify(token, config.JWT_SECRET) as jwt.JwtPayload;
-    const userId = Number(payload.sub);
+    userId = Number(payload.sub);
     if (!Number.isInteger(userId)) throw new Error('Invalid token');
-    (req as AuthRequest).userId = userId;
-    next();
   } catch {
     return res.status(401).json({message: 'Jeton invalide ou expiré'});
   }
+  (req as AuthRequest).userId = userId;
+  isSuspended(userId)
+    .then(suspended => (suspended ? res.status(403).json({message: SUSPENDED_MESSAGE, code: 'ACCOUNT_SUSPENDED'}) : next()))
+    .catch(next);
 }
 
 /** Identifiant de l'utilisateur si un jeton valide est fourni, sinon undefined (routes publiques). */

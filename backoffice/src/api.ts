@@ -116,7 +116,7 @@ export async function logout() {
 /* ─────────── Types partagés ─────────── */
 export type Role = 'USER' | 'ADMIN' | 'ESTABLISHMENT' | 'SCANNER';
 export type Plan = 'DISCOVERY' | 'ESSENTIAL' | 'PRO' | 'PREMIUM';
-export type AdminUser = {id: number; email: string; firstName: string; lastName: string; mobile?: string | null; role: Role};
+export type AdminUser = {id: number; email: string; firstName: string; lastName: string; mobile?: string | null; role: Role; suspendedAt?: string | null; suspendedReason?: string | null};
 export type Page<T> = {items: T[]; total: number; page: number; pageSize: number; pages: number};
 export type Category = {id: number; name: string; image?: string | null; places: number};
 export type PlaceRow = {

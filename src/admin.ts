@@ -2,7 +2,8 @@
 import {MediaModerationStatus, Prisma, ReservationStatus, SubscriptionPlan, SubscriptionStatus, UserRole, VenueEnvironment} from '@prisma/client';
 import {NextFunction, Request, Response, Router} from 'express';
 import {z} from 'zod';
-import {AuthRequest} from './auth';
+import bcrypt from 'bcryptjs';
+import {AuthRequest, forgetSuspension} from './auth';
 import {prisma} from './db';
 import {containsProfanity} from './profanity';
 import {SOURCE_LABELS, conversionRate, mergeDaily, percentChange, periodDays, videoThumbnail} from './audienceLogic';
@@ -28,7 +29,8 @@ adminRouter.use((req, res, next) => {
 const audit = (req: Request, placeId: number, action: string, entityType: string, entityId?: number, details?: Prisma.InputJsonValue) =>
   prisma.auditLog.create({data: {actorId: actorId(req), placeId, action, entityType, entityId, details}}).catch(() => undefined);
 
-const userSummary = (u: any) => u ? {id: u.id, email: u.email, firstName: u.firstName, lastName: u.lastName, mobile: u.mobile, role: u.role} : null;
+const userSummary = (u: any) => u ? {id: u.id, email: u.email, firstName: u.firstName, lastName: u.lastName, mobile: u.mobile, role: u.role, suspendedAt: u.suspendedAt ?? null, suspendedReason: u.suspendedReason ?? null} : null;
+const PRO_ROLES: UserRole[] = [UserRole.ESTABLISHMENT, UserRole.SCANNER];
 
 /* ─────────── Tableau de bord ─────────── */
 adminRouter.get('/me', route(async (req, res) => {
@@ -234,10 +236,18 @@ adminRouter.delete('/subscriptions/:placeId/request', route(async (req, res) => 
 
 /* ─────────── Utilisateurs ─────────── */
 adminRouter.get('/users', route(async (req, res) => {
-  const q = pageQuery.extend({q: z.string().trim().optional(), role: z.nativeEnum(UserRole).optional()}).parse(req.query);
+  const q = pageQuery.extend({
+    q: z.string().trim().optional(),
+    role: z.nativeEnum(UserRole).optional(),
+    // public = clients de l'app ; pro = gérants et contrôle QR ; admin = équipe Barmej.
+    kind: z.enum(['public', 'pro', 'admin']).optional(),
+    status: z.enum(['active', 'suspended']).optional(),
+  }).parse(req.query);
+  const kindRoles = q.kind === 'public' ? [UserRole.USER] : q.kind === 'pro' ? PRO_ROLES : q.kind === 'admin' ? [UserRole.ADMIN] : undefined;
   const where: Prisma.UserWhereInput = {
     ...(q.q ? {OR: [{email: {contains: q.q, mode: 'insensitive'}}, {firstName: {contains: q.q, mode: 'insensitive'}}, {lastName: {contains: q.q, mode: 'insensitive'}}, {mobile: {contains: q.q}}]} : {}),
-    ...(q.role ? {role: q.role} : {}),
+    ...(q.role ? {role: q.role} : kindRoles ? {role: {in: kindRoles}} : {}),
+    ...(q.status === 'suspended' ? {suspendedAt: {not: null}} : q.status === 'active' ? {suspendedAt: null} : {}),
   };
   const [rows, total] = await Promise.all([
     prisma.user.findMany({where, include: {managedPlaces: {include: {place: {select: {id: true, name: true}}}}, _count: {select: {reservations: true, stayBookings: true, barmejliPlans: true}}}, orderBy: {createdAt: 'desc'}, skip: (q.page - 1) * q.pageSize, take: q.pageSize}),
@@ -255,6 +265,74 @@ adminRouter.patch('/users/:id', route(async (req, res) => {
   if (userId === actorId(req) && body.role !== UserRole.ADMIN) return res.status(409).json({message: 'Vous ne pouvez pas retirer votre propre rôle administrateur.'});
   const user = await prisma.user.update({where: {id: userId}, data: {role: body.role}});
   return res.json(userSummary(user));
+}));
+
+// Suspension : plus de connexion, sessions en cours coupées (jetons révoqués, accès refusé sous 30 s).
+adminRouter.post('/users/:id/suspend', route(async (req, res) => {
+  const userId = positiveId(req.params.id);
+  const {reason} = z.object({reason: z.string().trim().max(300).optional()}).parse(req.body ?? {});
+  if (userId === actorId(req)) return res.status(409).json({message: 'Vous ne pouvez pas suspendre votre propre compte.'});
+  const target = await prisma.user.findUnique({where: {id: userId}, select: {role: true}});
+  if (!target) return res.status(404).json({message: 'Compte introuvable'});
+  if (target.role === UserRole.ADMIN) return res.status(409).json({message: 'Retirez d’abord le rôle administrateur avant de suspendre ce compte.'});
+  const [user] = await prisma.$transaction([
+    prisma.user.update({where: {id: userId}, data: {suspendedAt: new Date(), suspendedReason: reason || null}}),
+    prisma.refreshToken.updateMany({where: {userId, revokedAt: null}, data: {revokedAt: new Date()}}),
+  ]);
+  forgetSuspension(userId);
+  return res.json(userSummary(user));
+}));
+
+adminRouter.post('/users/:id/reactivate', route(async (req, res) => {
+  const userId = positiveId(req.params.id);
+  const user = await prisma.user.update({where: {id: userId}, data: {suspendedAt: null, suspendedReason: null}});
+  forgetSuspension(userId);
+  return res.json(userSummary(user));
+}));
+
+/* ─────────── Comptes Pro (gérants, contrôle QR) ─────────── */
+const proAccountInput = z.object({
+  email: z.string().trim().email().transform(v => v.toLowerCase()),
+  firstName: z.string().trim().min(1).max(80),
+  lastName: z.string().trim().max(80).default(''),
+  mobile: z.string().trim().max(30).optional().nullable(),
+  role: z.enum(['ESTABLISHMENT', 'SCANNER']),
+  // Mot de passe provisoire choisi par l'admin, à transmettre au gérant (jamais renvoyé par l'API).
+  password: z.string().min(8, 'Mot de passe : 8 caractères minimum').max(128),
+  placeIds: z.array(z.coerce.number().int().positive()).max(50).default([]),
+});
+
+adminRouter.post('/pro-accounts', route(async (req, res) => {
+  const body = proAccountInput.parse(req.body);
+  if (await prisma.user.findUnique({where: {email: body.email}, select: {id: true}})) {
+    return res.status(409).json({message: 'Un compte existe déjà avec cet e-mail. Rattachez-le à l’établissement depuis la page Établissements.'});
+  }
+  const placeIds = [...new Set(body.placeIds)];
+  if (placeIds.length && (await prisma.place.count({where: {id: {in: placeIds}}})) !== placeIds.length) {
+    return res.status(400).json({message: 'Un des établissements choisis n’existe pas.'});
+  }
+  const user = await prisma.user.create({
+    data: {
+      email: body.email, firstName: body.firstName, lastName: body.lastName, mobile: body.mobile || null,
+      role: body.role as UserRole, passwordHash: await bcrypt.hash(body.password, 12),
+      managedPlaces: {create: placeIds.map(placeId => ({placeId}))},
+    },
+    include: {managedPlaces: {include: {place: {select: {id: true, name: true}}}}},
+  });
+  await Promise.all(placeIds.map(placeId => audit(req, placeId, 'ADMIN_PRO_ACCOUNT_CREATED', 'USER', user.id, {email: user.email, role: user.role})));
+  return res.status(201).json({...userSummary(user), places: user.managedPlaces.map(m => m.place)});
+}));
+
+adminRouter.delete('/pro-accounts/:id', route(async (req, res) => {
+  const userId = positiveId(req.params.id);
+  if (userId === actorId(req)) return res.status(409).json({message: 'Vous ne pouvez pas supprimer votre propre compte.'});
+  const user = await prisma.user.findUnique({where: {id: userId}, include: {managedPlaces: true}});
+  if (!user) return res.status(404).json({message: 'Compte introuvable'});
+  if (!PRO_ROLES.includes(user.role)) return res.status(409).json({message: 'Seuls les comptes Pro (gérant, contrôle QR) peuvent être supprimés ici.'});
+  await Promise.all(user.managedPlaces.map(m => audit(req, m.placeId, 'ADMIN_PRO_ACCOUNT_DELETED', 'USER', user.id, {email: user.email, role: user.role})));
+  await prisma.user.delete({where: {id: userId}});
+  forgetSuspension(userId);
+  return res.status(204).send();
 }));
 
 /* ─────────── Modération ─────────── */
